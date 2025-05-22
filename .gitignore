@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Flask
+instance/
+.webassets-cache
+
+# Environment variables
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Database
+*.db
+*.sqlite3
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Replit specific
+.replit
+replit.nix
+.upm/
+.pythonlibs/
+
+# Temporary files
+ngrok_config.json
+*.tmp
+*.temp
+
+# Media uploads (configure based on your needs)
+uploads/
+media/
+static/uploads/
+
+# Google Cloud credentials (never commit!)
+*.json
+service-account-*.json
+google-credentials.json
