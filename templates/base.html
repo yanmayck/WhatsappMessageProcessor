@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}WhatsApp AI System{% endblock %}</title>
+    
+    <!-- Bootstrap CSS with Replit dark theme -->
+    <link href="https://cdn.replit.com/agent/bootstrap-agent-dark-theme.min.css" rel="stylesheet">
+    
+    <!-- Feather Icons -->
+    <script src="https://unpkg.com/feather-icons"></script>
+    
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/custom.css') }}">
+    
+    {% block extra_head %}{% endblock %}
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container">
+            <a class="navbar-brand" href="{{ url_for('dashboard.index') }}">
+                <i data-feather="message-circle" class="me-2"></i>
+                WhatsApp AI System
+            </a>
+            
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav me-auto">
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint == 'dashboard.index' %}active{% endif %}" 
+                           href="{{ url_for('dashboard.index') }}">
+                            <i data-feather="home" class="me-1"></i>
+                            Dashboard
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.endpoint == 'dashboard.conversations' %}active{% endif %}" 
+                           href="{{ url_for('dashboard.conversations') }}">
+                            <i data-feather="message-square" class="me-1"></i>
+                            Conversations
+                        </a>
+                    </li>
+                </ul>
+                
+                <ul class="navbar-nav">
+                    <li class="nav-item dropdown">
+                        <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">
+                            <i data-feather="settings" class="me-1"></i>
+                            System
+                        </a>
+                        <ul class="dropdown-menu">
+                            <li><a class="dropdown-item" href="#" onclick="checkSystemStatus()">
+                                <i data-feather="activity" class="me-1"></i>
+                                Status
+                            </a></li>
+                            <li><a class="dropdown-item" href="/webhook/whatsapp" target="_blank">
+                                <i data-feather="link" class="me-1"></i>
+                                Webhook URL
+                            </a></li>
+                        </ul>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="container my-4">
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-dark text-light py-4 mt-5">
+        <div class="container">
+            <div class="row">
+                <div class="col-md-6">
+                    <h6>WhatsApp AI System</h6>
+                    <p class="text-muted small mb-0">
+                        Multimodal AI processing with Gemini 2.0 Flash Experimental
+                    </p>
+                </div>
+                <div class="col-md-6 text-md-end">
+                    <small class="text-muted">
+                        Powered by Flask, Google Cloud Storage & Gemini AI
+                    </small>
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <!-- Custom JS -->
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+    
+    <script>
+        // Initialize Feather icons
+        feather.replace();
+        
+        // System status check
+        function checkSystemStatus() {
+            fetch('/api/stats')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        alert('System Error: ' + data.error);
+                    } else {
+                        const successRate = data.success_rates?.processing || 0;
+                        const status = successRate > 80 ? 'Healthy' : successRate > 50 ? 'Warning' : 'Critical';
+                        alert(`System Status: ${status}\nProcessing Success Rate: ${successRate.toFixed(1)}%\nTotal Messages: ${data.totals?.messages || 0}`);
+                    }
+                })
+                .catch(error => {
+                    alert('Failed to check system status: ' + error.message);
+                });
+        }
+        
+        // Auto-refresh functionality for real-time updates
+        let autoRefreshInterval;
+        
+        function startAutoRefresh(callback, interval = 30000) {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+            }
+            autoRefreshInterval = setInterval(callback, interval);
+        }
+        
+        function stopAutoRefresh() {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+            }
+        }
+        
+        // Initialize auto-refresh on dashboard pages
+        if (window.location.pathname === '/' || window.location.pathname.includes('/conversation/')) {
+            startAutoRefresh(() => {
+                if (typeof refreshDashboard === 'function') {
+                    refreshDashboard();
+                }
+            });
+        }
+        
+        // Stop auto-refresh when page is hidden
+        document.addEventListener('visibilitychange', function() {
+            if (document.hidden) {
+                stopAutoRefresh();
+            } else {
+                if (window.location.pathname === '/' || window.location.pathname.includes('/conversation/')) {
+                    startAutoRefresh(() => {
+                        if (typeof refreshDashboard === 'function') {
+                            refreshDashboard();
+                        }
+                    });
+                }
+            }
+        });
+    </script>
+    
+    {% block extra_scripts %}{% endblock %}
+</body>
+</html>

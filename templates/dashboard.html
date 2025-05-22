@@ -1,0 +1,334 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - WhatsApp AI System{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col">
+        <h1 class="h2 mb-3">
+            <i data-feather="activity" class="me-2"></i>
+            Dashboard
+        </h1>
+        <p class="text-muted">Monitor WhatsApp conversations and AI processing</p>
+    </div>
+</div>
+
+<!-- Statistics Cards -->
+<div class="row mb-4" id="stats-cards">
+    {% if stats.error %}
+    <div class="col-12">
+        <div class="alert alert-danger" role="alert">
+            <i data-feather="alert-circle" class="me-2"></i>
+            Error loading statistics: {{ stats.error }}
+        </div>
+    </div>
+    {% else %}
+    <div class="col-md-3 mb-3">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h6 class="card-title text-muted">Total Conversations</h6>
+                        <h3 class="mb-0">{{ stats.total_conversations or 0 }}</h3>
+                    </div>
+                    <div class="text-primary">
+                        <i data-feather="message-circle" size="32"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3 mb-3">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h6 class="card-title text-muted">Total Messages</h6>
+                        <h3 class="mb-0">{{ stats.total_messages or 0 }}</h3>
+                    </div>
+                    <div class="text-success">
+                        <i data-feather="message-square" size="32"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3 mb-3">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h6 class="card-title text-muted">Media Files</h6>
+                        <h3 class="mb-0">{{ stats.total_media_files or 0 }}</h3>
+                    </div>
+                    <div class="text-info">
+                        <i data-feather="file" size="32"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3 mb-3">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h6 class="card-title text-muted">Active Conversations</h6>
+                        <h3 class="mb-0">{{ stats.active_conversations or 0 }}</h3>
+                    </div>
+                    <div class="text-warning">
+                        <i data-feather="users" size="32"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Recent Activity -->
+<div class="row">
+    <!-- Recent Conversations -->
+    <div class="col-lg-8 mb-4">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">
+                    <i data-feather="clock" class="me-2"></i>
+                    Recent Conversations
+                </h5>
+                <a href="{{ url_for('dashboard.conversations') }}" class="btn btn-sm btn-outline-primary">
+                    View All
+                    <i data-feather="arrow-right" class="ms-1"></i>
+                </a>
+            </div>
+            <div class="card-body">
+                {% if recent_conversations %}
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>Contact</th>
+                                <th>Phone Number</th>
+                                <th>Messages</th>
+                                <th>Last Activity</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for conversation, message_count, last_message_time in recent_conversations %}
+                            <tr>
+                                <td>
+                                    <div class="d-flex align-items-center">
+                                        <div class="avatar bg-primary text-white rounded-circle me-2 d-flex align-items-center justify-content-center" style="width: 32px; height: 32px;">
+                                            {{ (conversation.contact_name or conversation.phone_number)[0].upper() }}
+                                        </div>
+                                        <div>
+                                            <strong>{{ conversation.contact_name or 'Unknown' }}</strong>
+                                            {% if conversation.is_active %}
+                                            <span class="badge bg-success ms-1">Active</span>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </td>
+                                <td>
+                                    <span class="text-monospace">{{ conversation.phone_number }}</span>
+                                </td>
+                                <td>
+                                    <span class="badge bg-secondary">{{ message_count or 0 }}</span>
+                                </td>
+                                <td>
+                                    {% if last_message_time %}
+                                    <small class="text-muted" data-timestamp="{{ last_message_time.isoformat() }}">
+                                        {{ last_message_time.strftime('%Y-%m-%d %H:%M') }}
+                                    </small>
+                                    {% else %}
+                                    <small class="text-muted">No messages</small>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <a href="{{ url_for('dashboard.conversation_detail', conversation_id=conversation.id) }}" 
+                                       class="btn btn-sm btn-outline-primary">
+                                        <i data-feather="eye" class="me-1"></i>
+                                        View
+                                    </a>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <div class="text-center py-4">
+                    <i data-feather="message-circle" size="48" class="text-muted mb-3"></i>
+                    <p class="text-muted">No conversations yet. Messages will appear here when they're received via WhatsApp.</p>
+                    <p class="small text-muted">
+                        Webhook URL: <code>{{ request.url_root }}webhook/whatsapp</code>
+                    </p>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    
+    <!-- Recent Media -->
+    <div class="col-lg-4 mb-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i data-feather="image" class="me-2"></i>
+                    Recent Media
+                </h5>
+            </div>
+            <div class="card-body">
+                {% if recent_media %}
+                <div class="list-group list-group-flush">
+                    {% for media, message, conversation in recent_media %}
+                    <div class="list-group-item border-0 px-0">
+                        <div class="d-flex align-items-center">
+                            <div class="me-3">
+                                {% if message.message_type == 'image' %}
+                                <i data-feather="image" class="text-success"></i>
+                                {% elif message.message_type == 'audio' %}
+                                <i data-feather="headphones" class="text-info"></i>
+                                {% elif message.message_type == 'video' %}
+                                <i data-feather="video" class="text-warning"></i>
+                                {% else %}
+                                <i data-feather="file" class="text-secondary"></i>
+                                {% endif %}
+                            </div>
+                            <div class="flex-fill">
+                                <div class="fw-bold">{{ media.file_name[:20] }}{% if media.file_name|length > 20 %}...{% endif %}</div>
+                                <small class="text-muted">
+                                    {{ conversation.contact_name or conversation.phone_number }}
+                                </small>
+                                <br>
+                                <small class="text-muted">
+                                    {{ (media.file_size / 1024 / 1024) | round(2) if media.file_size else 0 }} MB
+                                </small>
+                            </div>
+                            <div>
+                                {% if media.public_url %}
+                                <a href="{{ media.public_url }}" target="_blank" class="btn btn-sm btn-outline-primary">
+                                    <i data-feather="external-link"></i>
+                                </a>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <div class="text-center py-4">
+                    <i data-feather="image" size="48" class="text-muted mb-3"></i>
+                    <p class="text-muted">No media files yet. Images, audio, and documents will appear here.</p>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- System Information -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i data-feather="info" class="me-2"></i>
+                    System Information
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <h6>Webhook Configuration</h6>
+                        <p class="small text-muted mb-2">
+                            <strong>Webhook URL:</strong><br>
+                            <code>{{ request.url_root }}webhook/whatsapp</code>
+                        </p>
+                        <p class="small text-muted mb-2">
+                            <strong>Verification Token:</strong> Configured
+                        </p>
+                        <p class="small text-muted">
+                            <strong>Status:</strong> 
+                            <span class="badge bg-success">Ready</span>
+                        </p>
+                    </div>
+                    <div class="col-md-6">
+                        <h6>AI Processing</h6>
+                        <p class="small text-muted mb-2">
+                            <strong>Model:</strong> Gemini 2.0 Flash Experimental
+                        </p>
+                        <p class="small text-muted mb-2">
+                            <strong>Capabilities:</strong> Text, Image, Audio Analysis
+                        </p>
+                        <p class="small text-muted">
+                            <strong>Storage:</strong> Google Cloud Storage
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+    function refreshDashboard() {
+        // Refresh statistics
+        fetch('/api/stats')
+            .then(response => response.json())
+            .then(data => {
+                if (!data.error) {
+                    updateStatsCards(data);
+                }
+            })
+            .catch(error => console.error('Error refreshing stats:', error));
+    }
+    
+    function updateStatsCards(data) {
+        const totals = data.totals || {};
+        
+        // Update card values
+        const cards = document.querySelectorAll('#stats-cards .card h3');
+        if (cards.length >= 4) {
+            cards[0].textContent = totals.conversations || 0;
+            cards[1].textContent = totals.messages || 0;
+            cards[2].textContent = totals.media_files || 0;
+            cards[3].textContent = totals.active_conversations || 0;
+        }
+    }
+    
+    // Format timestamps relative to now
+    function formatTimestamps() {
+        document.querySelectorAll('[data-timestamp]').forEach(element => {
+            const timestamp = new Date(element.dataset.timestamp);
+            const now = new Date();
+            const diff = now - timestamp;
+            
+            let formatted = '';
+            if (diff < 60000) { // Less than 1 minute
+                formatted = 'Just now';
+            } else if (diff < 3600000) { // Less than 1 hour
+                formatted = Math.floor(diff / 60000) + 'm ago';
+            } else if (diff < 86400000) { // Less than 1 day
+                formatted = Math.floor(diff / 3600000) + 'h ago';
+            } else {
+                formatted = Math.floor(diff / 86400000) + 'd ago';
+            }
+            
+            element.textContent = formatted;
+        });
+    }
+    
+    // Initialize timestamp formatting
+    formatTimestamps();
+    
+    // Update timestamps every minute
+    setInterval(formatTimestamps, 60000);
+</script>
+{% endblock %}
