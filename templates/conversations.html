@@ -1,0 +1,315 @@
+{% extends "base.html" %}
+
+{% block title %}Conversations - WhatsApp AI System{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col">
+        <h1 class="h2 mb-3">
+            <i data-feather="message-square" class="me-2"></i>
+            All Conversations
+        </h1>
+        <p class="text-muted">Manage and view all WhatsApp conversations</p>
+    </div>
+</div>
+
+<!-- Search and Filters -->
+<div class="row mb-4">
+    <div class="col-md-8">
+        <div class="search-container">
+            <i data-feather="search" class="search-icon"></i>
+            <input type="text" 
+                   class="form-control search-input" 
+                   id="conversationSearch" 
+                   placeholder="Search conversations by phone number or name...">
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="d-flex gap-2">
+            <button class="btn btn-outline-secondary filter-tab active" data-filter="all">
+                All
+            </button>
+            <button class="btn btn-outline-secondary filter-tab" data-filter="active">
+                Active
+            </button>
+            <button class="btn btn-outline-secondary filter-tab" data-filter="media">
+                With Media
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Search Results -->
+<div id="searchResults" class="mb-4"></div>
+
+<!-- Conversations List -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">
+                    <i data-feather="users" class="me-2"></i>
+                    Conversations
+                </h5>
+                <div class="d-flex align-items-center gap-2">
+                    <button class="btn btn-sm btn-outline-primary" onclick="refreshConversations()">
+                        <i data-feather="refresh-cw" class="me-1"></i>
+                        Refresh
+                    </button>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                {% if error %}
+                <div class="alert alert-danger m-3" role="alert">
+                    <i data-feather="alert-circle" class="me-2"></i>
+                    {{ error }}
+                </div>
+                {% elif conversations and conversations.items %}
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead>
+                            <tr>
+                                <th>Contact</th>
+                                <th>Phone Number</th>
+                                <th>Messages</th>
+                                <th>Last Activity</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for conversation, message_count, last_message_time in conversations.items %}
+                            <tr data-conversation='{"id": {{ conversation.id }}, "is_active": {{ conversation.is_active|lower }}, "has_media": true}'>
+                                <td>
+                                    <div class="d-flex align-items-center">
+                                        <div class="avatar bg-primary text-white rounded-circle me-3">
+                                            {{ (conversation.contact_name or conversation.phone_number)[0].upper() }}
+                                        </div>
+                                        <div>
+                                            <strong>{{ conversation.contact_name or 'Unknown Contact' }}</strong>
+                                            <br>
+                                            <small class="text-muted">
+                                                Created {{ conversation.created_at.strftime('%b %d, %Y') }}
+                                            </small>
+                                        </div>
+                                    </div>
+                                </td>
+                                <td>
+                                    <span class="font-monospace">{{ conversation.phone_number }}</span>
+                                </td>
+                                <td>
+                                    <span class="badge bg-secondary">{{ message_count or 0 }}</span>
+                                </td>
+                                <td>
+                                    {% if last_message_time %}
+                                    <small class="text-muted" data-timestamp="{{ last_message_time.isoformat() }}">
+                                        {{ last_message_time.strftime('%m/%d %H:%M') }}
+                                    </small>
+                                    {% else %}
+                                    <small class="text-muted">No messages</small>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if conversation.is_active %}
+                                    <span class="badge bg-success">Active</span>
+                                    {% else %}
+                                    <span class="badge bg-secondary">Inactive</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <div class="btn-group" role="group">
+                                        <a href="{{ url_for('dashboard.conversation_detail', conversation_id=conversation.id) }}" 
+                                           class="btn btn-sm btn-outline-primary">
+                                            <i data-feather="eye" class="me-1"></i>
+                                            View
+                                        </a>
+                                        <button class="btn btn-sm btn-outline-secondary dropdown-toggle" 
+                                                type="button" 
+                                                data-bs-toggle="dropdown">
+                                            <i data-feather="more-horizontal"></i>
+                                        </button>
+                                        <ul class="dropdown-menu">
+                                            <li>
+                                                <button class="dropdown-item" onclick="generateSummary({{ conversation.id }})">
+                                                    <i data-feather="file-text" class="me-2"></i>
+                                                    Generate Summary
+                                                </button>
+                                            </li>
+                                            <li>
+                                                <button class="dropdown-item" onclick="exportConversation({{ conversation.id }})">
+                                                    <i data-feather="download" class="me-2"></i>
+                                                    Export
+                                                </button>
+                                            </li>
+                                        </ul>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                
+                <!-- Pagination -->
+                {% if conversations.pages > 1 %}
+                <div class="d-flex justify-content-between align-items-center p-3">
+                    <small class="text-muted">
+                        Showing {{ conversations.per_page * (conversations.page - 1) + 1 }} to 
+                        {{ conversations.per_page * conversations.page if conversations.page < conversations.pages else conversations.total }} 
+                        of {{ conversations.total }} conversations
+                    </small>
+                    
+                    <nav>
+                        <ul class="pagination mb-0">
+                            {% if conversations.has_prev %}
+                            <li class="page-item">
+                                <a class="page-link" href="{{ url_for('dashboard.conversations', page=conversations.prev_num) }}">
+                                    <i data-feather="chevron-left"></i>
+                                </a>
+                            </li>
+                            {% endif %}
+                            
+                            {% for page_num in conversations.iter_pages() %}
+                                {% if page_num %}
+                                    {% if page_num != conversations.page %}
+                                    <li class="page-item">
+                                        <a class="page-link" href="{{ url_for('dashboard.conversations', page=page_num) }}">{{ page_num }}</a>
+                                    </li>
+                                    {% else %}
+                                    <li class="page-item active">
+                                        <span class="page-link">{{ page_num }}</span>
+                                    </li>
+                                    {% endif %}
+                                {% else %}
+                                <li class="page-item disabled">
+                                    <span class="page-link">...</span>
+                                </li>
+                                {% endif %}
+                            {% endfor %}
+                            
+                            {% if conversations.has_next %}
+                            <li class="page-item">
+                                <a class="page-link" href="{{ url_for('dashboard.conversations', page=conversations.next_num) }}">
+                                    <i data-feather="chevron-right"></i>
+                                </a>
+                            </li>
+                            {% endif %}
+                        </ul>
+                    </nav>
+                </div>
+                {% endif %}
+                
+                {% else %}
+                <div class="text-center py-5">
+                    <i data-feather="message-circle" size="64" class="text-muted mb-3"></i>
+                    <h4 class="text-muted">No conversations yet</h4>
+                    <p class="text-muted">
+                        Conversations will appear here when messages are received via WhatsApp.
+                    </p>
+                    <div class="mt-4">
+                        <h6 class="text-muted mb-2">Webhook URL:</h6>
+                        <div class="input-group" style="max-width: 500px; margin: 0 auto;">
+                            <input type="text" 
+                                   class="form-control font-monospace text-center" 
+                                   value="{{ request.url_root }}webhook/whatsapp" 
+                                   readonly>
+                            <button class="btn btn-outline-secondary" 
+                                    onclick="copyToClipboard('{{ request.url_root }}webhook/whatsapp')">
+                                <i data-feather="copy"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+    // Initialize WhatsApp Dashboard
+    const dashboard = new WhatsAppDashboard();
+    
+    function refreshConversations() {
+        window.location.reload();
+    }
+    
+    function generateSummary(conversationId) {
+        fetch(`/api/conversation/${conversationId}/summary`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error generating summary: ' + data.error);
+                } else {
+                    alert('Conversation Summary:\n\n' + data.summary);
+                }
+            })
+            .catch(error => {
+                alert('Failed to generate summary: ' + error.message);
+            });
+    }
+    
+    function exportConversation(conversationId) {
+        // This would implement conversation export functionality
+        alert('Export functionality will be implemented soon!');
+    }
+    
+    function copyToClipboard(text) {
+        navigator.clipboard.writeText(text).then(() => {
+            // Show toast notification
+            const toast = document.createElement('div');
+            toast.className = 'toast align-items-center text-white bg-success border-0 position-fixed';
+            toast.style.cssText = 'top: 20px; right: 20px; z-index: 9999;';
+            toast.innerHTML = `
+                <div class="d-flex">
+                    <div class="toast-body">
+                        <i data-feather="check" class="me-2"></i>
+                        Webhook URL copied to clipboard!
+                    </div>
+                    <button type="button" class="btn-close btn-close-white me-2 m-auto" onclick="this.parentElement.parentElement.remove()"></button>
+                </div>
+            `;
+            document.body.appendChild(toast);
+            feather.replace();
+            
+            // Auto remove after 3 seconds
+            setTimeout(() => {
+                if (toast.parentElement) {
+                    toast.parentElement.removeChild(toast);
+                }
+            }, 3000);
+        }).catch(err => {
+            console.error('Failed to copy: ', err);
+            alert('Failed to copy to clipboard');
+        });
+    }
+    
+    // Format relative timestamps
+    function updateTimestamps() {
+        document.querySelectorAll('[data-timestamp]').forEach(element => {
+            const timestamp = new Date(element.dataset.timestamp);
+            const now = new Date();
+            const diff = now - timestamp;
+            
+            let formatted = '';
+            if (diff < 60000) {
+                formatted = 'Just now';
+            } else if (diff < 3600000) {
+                formatted = Math.floor(diff / 60000) + 'm ago';
+            } else if (diff < 86400000) {
+                formatted = Math.floor(diff / 3600000) + 'h ago';
+            } else {
+                formatted = Math.floor(diff / 86400000) + 'd ago';
+            }
+            
+            element.textContent = formatted;
+        });
+    }
+    
+    // Update timestamps every minute
+    updateTimestamps();
+    setInterval(updateTimestamps, 60000);
+</script>
+{% endblock %}
