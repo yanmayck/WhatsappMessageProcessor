@@ -1,13 +1,17 @@
 from flask import Blueprint, render_template, request, jsonify, url_for
 from sqlalchemy import desc, func
 from app import db
-from models import Conversation, Message, AIResponse, MediaFile
+from models import Conversation, Message, AIResponse, MediaFile, HumanAgentRequest
 from services.ai_service import AIService
+# from services.whatsapp_service import WhatsAppService
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 dashboard_bp = Blueprint('dashboard', __name__)
+
+# whatsapp_service_instance = WhatsAppService()
 
 @dashboard_bp.route('/')
 def index():
@@ -338,3 +342,123 @@ def api_conversation_summary(conversation_id):
     except Exception as e:
         logger.error(f"Conversation summary error: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+@dashboard_bp.route('/api/human-handoff-requests', methods=['GET'])
+def api_get_human_handoff_requests():
+    """API endpoint para listar solicitações de atendimento humano."""
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+        status_filter = request.args.get('status', 'pending')
+
+        query = HumanAgentRequest.query
+        if status_filter != 'all':
+            query = query.filter(HumanAgentRequest.status == status_filter)
+        
+        requests_page = query.order_by(desc(HumanAgentRequest.request_time)).paginate(
+            page=page, per_page=per_page, error_out=False
+        )
+
+        result = {
+            'requests': [],
+            'pagination': {
+                'page': requests_page.page,
+                'pages': requests_page.pages,
+                'per_page': requests_page.per_page,
+                'total': requests_page.total,
+                'has_next': requests_page.has_next,
+                'has_prev': requests_page.has_prev
+            }
+        }
+
+        for req in requests_page.items:
+            result['requests'].append({
+                'id': req.id,
+                'conversation_id': req.conversation_id,
+                'phone_number': req.phone_number,
+                'contact_name': req.contact_name,
+                'request_time': req.request_time.isoformat() if req.request_time else None,
+                'status': req.status,
+                'escalation_reason': req.escalation_reason,
+                'ai_summary_of_issue': req.ai_summary_of_issue,
+                'assigned_agent_id': req.assigned_agent_id,
+                'assigned_time': req.assigned_time.isoformat() if req.assigned_time else None,
+                'closed_time': req.closed_time.isoformat() if req.closed_time else None,
+                'conversation_url': url_for('dashboard.conversation_detail', conversation_id=req.conversation_id)
+            })
+        
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"API human handoff requests error: {str(e)}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+@dashboard_bp.route('/api/human-handoff-requests/<int:request_id>', methods=['GET'])
+def api_get_human_handoff_request_detail(request_id):
+    """API endpoint para obter detalhes de uma solicitação de atendimento humano, incluindo histórico completo."""
+    try:
+        req = HumanAgentRequest.query.get_or_404(request_id)
+        return jsonify({
+            'id': req.id,
+            'conversation_id': req.conversation_id,
+            'phone_number': req.phone_number,
+            'contact_name': req.contact_name,
+            'request_time': req.request_time.isoformat() if req.request_time else None,
+            'status': req.status,
+            'escalation_reason': req.escalation_reason,
+            'ai_summary_of_issue': req.ai_summary_of_issue,
+            'full_conversation_history_json': req.full_conversation_history_json,
+            'assigned_agent_id': req.assigned_agent_id,
+            'assigned_time': req.assigned_time.isoformat() if req.assigned_time else None,
+            'resolution_notes': req.resolution_notes,
+            'closed_time': req.closed_time.isoformat() if req.closed_time else None,
+            'conversation_url': url_for('dashboard.conversation_detail', conversation_id=req.conversation_id)
+        })
+    except Exception as e:
+        logger.error(f"API human handoff request detail error for ID {request_id}: {str(e)}", exc_info=True)
+        return jsonify({'error': str(e)}), 404 if isinstance(e, Exception) and "404 Not Found" in str(e) else 500
+
+@dashboard_bp.route('/api/human-handoff-requests/<int:request_id>/assign', methods=['POST'])
+def api_assign_human_handoff_request(request_id):
+    """API endpoint para um agente se atribuir a uma solicitação."""
+    try:
+        data = request.get_json()
+        agent_id = data.get('agent_id')
+
+        if not agent_id:
+            return jsonify({'error': 'agent_id é obrigatório'}), 400
+
+        req = HumanAgentRequest.query.get_or_404(request_id)
+        
+        if req.status != 'pending':
+            return jsonify({'error': f'Solicitação {request_id} não está pendente (status atual: {req.status})'}), 400
+
+        req.status = 'assigned'
+        req.assigned_agent_id = agent_id
+        req.assigned_time = datetime.utcnow()
+        db.session.commit()
+
+        logger.info(f"HumanAgentRequest {request_id} atribuído ao agente {agent_id}")
+        return jsonify({
+            'message': 'Solicitação atribuída com sucesso',
+            'request': {
+                'id': req.id,
+                'status': req.status,
+                'assigned_agent_id': req.assigned_agent_id,
+                'assigned_time': req.assigned_time.isoformat()
+            }
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Erro ao atribuir HumanAgentRequest {request_id}: {str(e)}", exc_info=True)
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+@dashboard_bp.route('/human-handoff')
+def human_handoff_page():
+    """Página do dashboard para gerenciar solicitações de atendimento humano."""
+    # Esta rota simplesmente renderizaria um template HTML.
+    # A lógica de dados viria das chamadas de API (api_get_human_handoff_requests).
+    # Por enquanto, apenas uma resposta placeholder.
+    # return render_template('human_handoff.html', title="Atendimento Humano") 
+    return jsonify({"message": "Página de Atendimento Humano (template HTML a ser criado)"}), 200

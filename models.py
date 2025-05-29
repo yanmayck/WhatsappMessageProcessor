@@ -1,6 +1,6 @@
 from app import db
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, func, JSON
 from sqlalchemy.orm import relationship
 
 class Conversation(db.Model):
@@ -82,5 +82,36 @@ class MediaFile(db.Model):
     uploaded_at = Column(DateTime, default=datetime.utcnow)
     processing_status = Column(String(20), default='pending')  # pending, processed, error
     
+    # Adicionando relacionamento reverso para fácil acesso a partir da Mensagem, se necessário
+    # message = relationship("Message", back_populates="media_files_associated") # Descomente se criar media_files_associated em Message
+
     def __repr__(self):
         return f'<MediaFile {self.file_name}>'
+
+class HumanAgentRequest(db.Model):
+    __tablename__ = 'human_agent_requests' # Nome da tabela corrigido para plural e snake_case
+    id = db.Column(db.Integer, primary_key=True)
+    conversation_id = db.Column(db.Integer, db.ForeignKey('conversations.id'), nullable=False) # ForeignKey para 'conversations.id'
+    phone_number = db.Column(db.String(30), nullable=False)
+    contact_name = db.Column(db.String(150), nullable=True)
+    request_time = db.Column(db.DateTime, server_default=func.now())
+    status = db.Column(db.String(50), default='pending', nullable=False) # pending, assigned, resolved_by_human, resolved_by_ai, closed
+    
+    # Novos campos para contexto e escalonamento
+    last_message_id_before_escalation = db.Column(db.Integer, db.ForeignKey('messages.id'), nullable=True)
+    escalation_reason = db.Column(db.String(100), nullable=True) # ex: user_explicit_request, ai_unable_to_answer, detected_frustration
+    ai_summary_of_issue = db.Column(db.Text, nullable=True) # Resumo gerado pela IA
+    full_conversation_history_json = db.Column(JSON, nullable=True) # Snapshot do histórico da conversa no momento do escalonamento
+
+    # Campos para o agente humano
+    assigned_agent_id = db.Column(db.String(100), nullable=True) # ID ou nome do agente humano
+    assigned_time = db.Column(db.DateTime, nullable=True)
+    resolution_notes = db.Column(db.Text, nullable=True) # Notas do agente humano sobre a resolução
+    closed_time = db.Column(db.DateTime, nullable=True)
+
+    # Relacionamentos
+    conversation = db.relationship('Conversation', backref=db.backref('human_agent_requests', lazy='dynamic', cascade="all, delete-orphan"))
+    last_message_before_escalation = db.relationship('Message', foreign_keys=[last_message_id_before_escalation])
+
+    def __repr__(self):
+        return f'<HumanAgentRequest id={self.id} phone={self.phone_number} status={self.status} time={self.request_time}>'

@@ -35,10 +35,12 @@ with app.app_context():
     # Import routes
     from routes.webhook import webhook_bp
     from routes.dashboard import dashboard_bp
+    from routes.tasks import tasks_bp
     
     # Register blueprints
     app.register_blueprint(webhook_bp)
     app.register_blueprint(dashboard_bp)
+    app.register_blueprint(tasks_bp)
     
     # Create all tables
     db.create_all()

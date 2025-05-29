@@ -22,8 +22,12 @@ class Config:
     GOOGLE_APPLICATION_CREDENTIALS = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
     
     # Gemini AI configuration
-    GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', 'your-gemini-api-key')
+    GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
     
+    # Configurações do Pushover para Notificações
+    PUSHOVER_APP_TOKEN = os.environ.get('PUSHOVER_APP_TOKEN') # Token da sua aplicação Pushover
+    DEFAULT_PUSHOVER_USER_KEY = os.environ.get('DEFAULT_PUSHOVER_USER_KEY') # User Key para testes ou fallback
+
     # Media processing configuration
     MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
     ALLOWED_EXTENSIONS = {
@@ -36,3 +40,9 @@ class Config:
     # Processing configuration
     ENABLE_ASYNC_PROCESSING = True
     MAX_PROCESSING_THREADS = 5
+
+    # Token for internal task processing (e.g., called by Cloud Scheduler)
+    INTERNAL_TASK_TOKEN = os.environ.get('INTERNAL_TASK_TOKEN', 'super-secret-dev-token-change-me')
+
+    # Configuração do logging
+    LOGGING_LEVEL = os.environ.get('LOGGING_LEVEL', 'INFO').upper()
