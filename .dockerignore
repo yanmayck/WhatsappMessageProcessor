@@ -1,0 +1,47 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+*.egg-info/
+pip-wheel-metadata/
+
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testes (se não forem rodados no contêiner em produção/CI)
+tests/
+*.test.py
+test_*.py
+pytest.ini
+.pytest_cache/
+
+# Arquivos de desenvolvimento local e documentação
+README.md
+setup_ngrok.py
+ngrok_config.json
+# .env # NUNCA inclua .env na imagem Docker
+instance/ # Adicionar se contiver dados apenas de desenvolvimento (ex: SQLite local)
+
+# Arquivos de lock de outros gerenciadores se não usados no Dockerfile
+# poetry.lock
+# Pipfile.lock
+uv.lock # Se pyproject.toml + pip é a fonte da verdade para o Docker
+
+# Outros
+.DS_Store
+Dockerfile # Não precisa copiar o Dockerfile para dentro dele mesmo
+.dockerignore # Nem este
+build/
+dist/
+*.log 

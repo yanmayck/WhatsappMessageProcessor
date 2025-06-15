@@ -4,20 +4,23 @@ FROM python:3.11-slim
 # Set the working directory in the container
 WORKDIR /app
 
-# Create a virtual environment
+# Install build dependencies for psycopg2 and FFmpeg
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libpq-dev \
+    ffmpeg \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Create and activate a virtual environment
 RUN python -m venv /opt/venv
-# Activate virtual environment
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy dependency definition files
-COPY pyproject.toml uv.lock* ./
-# uv.lock* para incluir uv.lock se ele existir.
-# Se você não usar uv.lock, apenas pyproject.toml.
+# Upgrade pip and setuptools first
+RUN pip install --upgrade pip setuptools wheel
 
-# Install dependencies
-# Usando pip install . para instalar a partir do pyproject.toml
-# --no-cache-dir é bom para manter a imagem menor
-RUN pip install --no-cache-dir .
+# Copy requirements file and install dependencies
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the application code
 COPY . .

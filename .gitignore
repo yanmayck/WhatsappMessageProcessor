@@ -72,3 +72,33 @@ static/uploads/
 *.json
 service-account-*.json
 google-credentials.json
+
+# Additional entries from the code block
+*.pyc
+*.pyo
+*.pyd
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+cython_debug/
+
+# Arquivos de ambiente
+# Não adicione o .env ao repositório!
+.env
+.env.*
+*.env.local
+env.bak
+.envrc

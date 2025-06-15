@@ -6,13 +6,16 @@ from pydub import AudioSegment
 from typing import Optional, Tuple, Dict, Any
 import mimetypes
 
+from config import Config
+
 logger = logging.getLogger(__name__)
 
 class MediaProcessor:
     def __init__(self):
-        self.supported_image_formats = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']
-        self.supported_audio_formats = ['.mp3', '.wav', '.ogg', '.m4a', '.opus', '.aac']
-        self.supported_video_formats = ['.mp4', '.avi', '.mov', '.webm', '.mkv']
+        self.supported_image_formats = Config.ALLOWED_EXTENSIONS_IMAGE
+        self.supported_audio_formats = Config.ALLOWED_EXTENSIONS_AUDIO
+        self.supported_video_formats = Config.ALLOWED_EXTENSIONS_VIDEO
+        self.supported_document_formats = Config.ALLOWED_EXTENSIONS_DOCUMENT
         
     def process_image(self, image_data: bytes, filename: str) -> Tuple[Optional[bytes], Optional[Dict[str, Any]]]:
         """Process image data and return optimized version with metadata"""
@@ -84,18 +87,17 @@ class MediaProcessor:
             # Load audio from bytes
             audio_io = io.BytesIO(audio_data)
             
-            # AudioSegment can auto-detect format, but we'll specify it if we know it
+            # WhatsApp sends ogg format with opus codec.
+            # Using from_file with an explicit format is often more robust with streams.
             if file_ext == '.mp3':
                 audio = AudioSegment.from_mp3(audio_io)
             elif file_ext == '.wav':
                 audio = AudioSegment.from_wav(audio_io)
-            elif file_ext == '.ogg':
-                audio = AudioSegment.from_ogg(audio_io)
-            elif file_ext == '.m4a':
-                audio = AudioSegment.from_file(audio_io, format="m4a")
             else:
-                # Try to auto-detect
-                audio = AudioSegment.from_file(audio_io)
+                # Explicitly use ogg format for other types, as this is what WhatsApp sends.
+                # This helps pydub/ffmpeg correctly interpret the stream.
+                audio_io.seek(0) # Rewind the stream to the beginning before reading
+                audio = AudioSegment.from_file(audio_io, format="ogg")
             
             # Get metadata
             metadata = {
@@ -173,8 +175,10 @@ class MediaProcessor:
             return 'audio'
         elif file_ext in self.supported_video_formats:
             return 'video'
-        else:
+        elif file_ext in self.supported_document_formats:
             return 'document'
+        else:
+            return 'document' # Default or consider 'unknown'
     
     def is_supported_format(self, filename: str, media_type: str) -> bool:
         """Check if the file format is supported for processing"""
@@ -186,8 +190,10 @@ class MediaProcessor:
             return file_ext in self.supported_audio_formats
         elif media_type == 'video':
             return file_ext in self.supported_video_formats
+        elif media_type == 'document':
+            return file_ext in self.supported_document_formats
         else:
-            return True  # Documents are generally supported
+            return True  # Or False if you want to be strict
     
     def get_file_info(self, data: bytes, filename: str) -> Dict[str, Any]:
         """Get basic file information"""

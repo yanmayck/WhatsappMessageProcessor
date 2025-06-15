@@ -68,15 +68,17 @@ class CloudStorageService:
             # Create blob and upload
             blob = self.bucket.blob(blob_name)
             
-            # Set content type if provided
-            if content_type:
-                blob.content_type = content_type
+            # Upload the file, explicitly setting the content type in the call.
+            # This is the correct way to set the content type for the upload itself.
+            blob.upload_from_string(
+                data=file_data,
+                content_type=content_type
+            )
             
-            # Upload the file
-            blob.upload_from_string(file_data)
-            
-            # Make the blob publicly readable
-            blob.make_public()
+            # The blob is automatically made public by the bucket's IAM policy
+            # (uniform bucket-level access). This call is unnecessary and causes
+            # an error with this configuration.
+            # blob.make_public()
             
             # Get public URL
             public_url = blob.public_url

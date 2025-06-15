@@ -1,0 +1,84 @@
+empresa:
+  nome: Ideallys
+  tipo: MEI
+  slogan: Soluções inteligentes para negócios modernos.
+  fundador: Yan Mayck 
+  cidades_atuacao_inicial:
+    - Caldas Novas
+    - Gramado
+  expansao_planejada: Grandes cidades do Brasil
+
+produtos_e_servicos:
+  - nome: Criação de sites
+    descricao: Desenvolvimento de sites profissionais personalizados para empresas, com foco em conversão e presença digital.
+
+  - nome: Marketing digital
+    descricao: Estratégias de tráfego pago e orgânico para atrair, converter e reter clientes.
+    detalhes:
+      - Tráfego pago: Google Ads, Meta Ads (Facebook, Instagram)
+      - Tráfego orgânico: SEO, marketing de conteúdo, redes sociais
+
+  - nome: Atendente virtual com IA multimodal
+    descricao: Chatbot com IA que compreende e responde a texto, áudio, imagem e vídeo, oferecendo atendimento personalizado para cada cliente.
+    funcionalidades:
+      - Atendimento por múltiplos canais: WhatsApp, site, redes sociais
+      - Armazenamento de histórico por cliente
+      - Personalização baseada em interações anteriores
+      - Processamento de linguagem natural, imagem, áudio e vídeo
+      - Respostas em diferentes formatos (texto, áudio, imagem)
+    planejamento_futuro:
+      - Relatórios sobre interações
+      - Insights sobre produtos mais pedidos por região
+      - Painel analítico de desempenho e comportamento do cliente
+      - Disponível futuramente por meio de plano adicional
+
+  - nome: Plataforma Autônoma de Segurança Cibernética
+    descricao: Em desenvolvimento. Essa plataforma usará IA para proteger ativos digitais de empresas, analisando padrões de comportamento e ameaças.
+
+publico_alvo:
+  - Pequenas empresas
+  - Negócios locais
+  - Profissionais autônomos
+  - Lojas virtuais
+  - Prestadores de serviço
+
+diferenciais:
+  - IA multimodal com personalização por cliente
+  - Atendimento automatizado 24/7 com base em histórico
+  - Soluções acessíveis e escaláveis
+  - Design moderno e centrado no usuário
+  - Integração fácil com ferramentas externas (CRM, anúncios, ERPs)
+
+infraestrutura_tecnica:
+  - Banco de dados vetorial para IA de atendimento
+  - Processamento multimodal (áudio, imagem, vídeo)
+  - Histórico individual de mensagens por cliente
+  - Sistema de recomendação com base em interações passadas
+  - Painel de desempenho e métricas de conversão
+  - Aprendizado contínuo com reindexação vetorial automática
+
+forma_de_contato:
+  canais:
+    - WhatsApp
+    - Instagram
+    - E-mail
+    - Formulário no site
+  atendimento:
+    - Segunda a Sexta: 9h às 18h
+    - Sábados: 9h às 13h
+    - Domingos e feriados: fechado
+
+politicas:
+  entrega:
+    tipo: serviços digitais
+    abrangencia: nacional
+    prazos:
+      - Sites: entre 2 a 4 semanas
+      - IA/Chatbot: entre 3 a 5 semanas
+    custo: por orçamento, com base no escopo do projeto
+
+observacoes_adicionais:
+  - IA atualiza automaticamente o conhecimento com base em novos dados
+  - Soluções adaptadas ao perfil e necessidade de cada cliente
+  - Suporte técnico incluso em todos os serviços
+  - Roadmap em planejamento para funcionalidades avançadas de insights e dados

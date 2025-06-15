@@ -10,15 +10,12 @@ import os
 import json
 import time
 import requests
+import shutil  # Adicionado para verificação de comando multiplataforma
 from urllib.parse import urljoin
 
 def check_ngrok_installed():
-    """Verifica se o ngrok está instalado"""
-    try:
-        result = subprocess.run(['which', 'ngrok'], capture_output=True, text=True)
-        return result.returncode == 0
-    except:
-        return False
+    """Verifica se o ngrok está instalado e no PATH do sistema"""
+    return shutil.which('ngrok') is not None
 
 def install_ngrok():
     """Instruções para instalar ngrok"""
@@ -39,7 +36,7 @@ def get_ngrok_tunnels():
     except:
         return None
 
-def start_ngrok_tunnel(port=5000):
+def start_ngrok_tunnel(port=8080):
     """Inicia o túnel ngrok"""
     print(f"🚀 Iniciando túnel ngrok na porta {port}...")
     
@@ -112,10 +109,10 @@ def main():
     
     # Verifica se o servidor Flask está rodando
     try:
-        response = requests.get('http://localhost:5000')
-        print("✅ Servidor Flask detectado na porta 5000")
+        response = requests.get('http://localhost:8080')
+        print("✅ Servidor Flask detectado na porta 8080")
     except:
-        print("⚠️  Servidor Flask não está rodando na porta 5000")
+        print("⚠️  Servidor Flask não está rodando na porta 8080")
         print("   Inicie o servidor primeiro: python main.py")
         return
     

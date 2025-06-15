@@ -1,11 +1,11 @@
 from flask import Blueprint, render_template, request, jsonify, url_for
 from sqlalchemy import desc, func
 from app import db
-from models import Conversation, Message, AIResponse, MediaFile, HumanAgentRequest
+from models import Conversation, Message, AIResponse, MediaFile, HumanAgentRequest, SilentMode
 from services.ai_service import AIService
 # from services.whatsapp_service import WhatsAppService
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -462,3 +462,72 @@ def human_handoff_page():
     # Por enquanto, apenas uma resposta placeholder.
     # return render_template('human_handoff.html', title="Atendimento Humano") 
     return jsonify({"message": "Página de Atendimento Humano (template HTML a ser criado)"}), 200
+
+@dashboard_bp.route('/api/conversation/<int:conversation_id>/silent_mode', methods=['POST'])
+def enable_silent_mode(conversation_id):
+    """Ativa o modo silencioso para uma conversa"""
+    try:
+        duration_hours = request.json.get('duration_hours', 24)  # Padrão de 24 horas
+        admin_name = request.json.get('admin_name', 'admin')
+        
+        conversation = Conversation.query.get_or_404(conversation_id)
+        
+        # Desativa qualquer modo silencioso existente
+        existing_silent = SilentMode.query.filter_by(
+            conversation_id=conversation_id,
+            is_active=True
+        ).all()
+        for silent in existing_silent:
+            silent.is_active = False
+        
+        # Cria novo modo silencioso
+        silent_mode = SilentMode(
+            conversation_id=conversation_id,
+            enabled_by=admin_name,
+            expires_at=datetime.utcnow() + timedelta(hours=duration_hours)
+        )
+        
+        db.session.add(silent_mode)
+        db.session.commit()
+        
+        return jsonify({
+            'status': 'success',
+            'message': f'Silent mode enabled for {duration_hours} hours',
+            'expires_at': silent_mode.expires_at.isoformat()
+        })
+        
+    except Exception as e:
+        logger.error(f"Error enabling silent mode: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@dashboard_bp.route('/api/conversation/<int:conversation_id>/silent_mode', methods=['DELETE'])
+def disable_silent_mode(conversation_id):
+    """Desativa o modo silencioso para uma conversa"""
+    try:
+        conversation = Conversation.query.get_or_404(conversation_id)
+        
+        # Desativa todos os modos silenciosos ativos
+        silent_modes = SilentMode.query.filter_by(
+            conversation_id=conversation_id,
+            is_active=True
+        ).all()
+        
+        if not silent_modes:
+            return jsonify({
+                'status': 'warning',
+                'message': 'Silent mode was not active'
+            })
+        
+        for silent in silent_modes:
+            silent.is_active = False
+        
+        db.session.commit()
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Silent mode disabled'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error disabling silent mode: {str(e)}")
+        return jsonify({'error': str(e)}), 500

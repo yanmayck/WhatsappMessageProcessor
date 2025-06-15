@@ -3,508 +3,540 @@ import json
 import logging
 import time
 from typing import Dict, Any, List, Optional
+import tempfile
+import subprocess
+import uuid
 
-# Removido: import google.generativeai as genai
-# Adicionado: Imports da biblioteca agno
 from agno.agent import Agent
 from agno.models.google import Gemini
-from agno.team import Team # Adicionado import para Team
-
-# Tentativa de importar Parts diretamente da biblioteca google-generativeai
-# Isso assume que agno.models.google.Gemini pode lidar com eles.
-try:
-    # from google.generativeai.types import Part, InlineData # Antigo
-    from google.ai.generativelanguage import Part, Blob as InlineData # Novo, google-genai usa Blob
-    # Se estiver usando a SDK mais nova "google-genai", o caminho pode ser:
-    # from google.ai.generativelanguage import Part, Blob as InlineData (Blob tem mime_type e data)
-    # Por enquanto, vamos manter o google.generativeai.types que corresponde à dependência atual
-    GOOGLE_GEMINI_PARTS_AVAILABLE = True
-except ImportError:
-    GOOGLE_GEMINI_PARTS_AVAILABLE = False
-    Part = None # type: ignore
-    InlineData = None # type: ignore
-    # logger.warning("Não foi possível importar Part/InlineData de google.generativeai.types. A multimodalidade pode não funcionar como esperado.") # Comentário antigo
-    if logger: # logger pode não estar definido se o import falhar muito cedo
-        logger.warning("Não foi possível importar Part/Blob de google.ai.generativelanguage. A multimodalidade pode não funcionar como esperado.")
-    else:
-        print("ALERTA: Não foi possível importar Part/Blob de google.ai.generativelanguage.")
+from agno.team import Team
+from services.geolocation_service import GeolocationService
+from pydub import AudioSegment
+from pydub.exceptions import CouldntDecodeError
 
 from config import Config
 
 logger = logging.getLogger(__name__)
 
-# Definição para compatibilidade com a estrutura esperada pela agno para multimodalidade
-# (Pode precisar de ajustes com base na documentação exata da agno para parts)
-class ImagePart:
-    def __init__(self, mime_type: str, data: bytes):
-        self.mime_type = mime_type
-        self.data = data
-
-    def to_dict(self): # A agno pode esperar um formato específico para 'parts'
-        return {"inline_data": {"mime_type": self.mime_type, "data": self.data}}
+try:
+    from google.ai.generativelanguage import Part, Blob as InlineData
+    GOOGLE_GEMINI_PARTS_AVAILABLE = True
+except ImportError:
+    GOOGLE_GEMINI_PARTS_AVAILABLE = False
+    Part = None
+    InlineData = None
+    if logger:
+        logger.warning("Could not import Part/Blob from google.ai.generativelanguage. Multimodality may not work as expected.")
+    else:
+        print("WARNING: Could not import Part/Blob from google.ai.generativelanguage.")
 
 class AIService:
     def __init__(self):
-        # Configuração da API Gemini não é mais feita globalmente com genai.configure
-        # A API key é passada diretamente para o modelo Gemini da agno
-
-        self.model_name = Config.GEMINI_API_KEY and "gemini-1.5-flash-latest" # Garante que só define se a key existir
+        self.model_name = Config.GEMINI_API_KEY and "gemini-1.5-flash-latest"
         self.api_key = Config.GEMINI_API_KEY
 
         if not self.api_key:
-            logger.error("GEMINI_API_KEY não configurada. O AIService não funcionará.")
-            # Levantar um erro aqui ou ter um estado inoperante claro
-            raise ValueError("GEMINI_API_KEY é necessária para AIService.")
+            logger.error("GEMINI_API_KEY is not configured. AIService will not work.")
+            raise ValueError("GEMINI_API_KEY is required for AIService.")
 
-        # Prompts personalizados para cada agente especializado (mantidos como estavam)
+        self.geolocation_service = GeolocationService()
+
+        # --- Construção Dinâmica do Prompt Conversacional ---
+        # As seções são combinadas para criar um guia de comportamento completo e personalizável para a IA.
+        conversational_prompt = f"""
+        Você é {Config.AI_NAME}, um assistente de IA para conversas no WhatsApp.
+
+        ---
+        **CONTEXTO DO NEGÓCIO:**
+        {Config.AI_BUSINESS_CONTEXT}
+        ---
+        **🎯 PERSONALIDADE E TOM:**
+        Sua personalidade deve ser: {Config.AI_PERSONALITY_DESCRIPTION}
+        ---
+        **⚡ ESTILO DE RESPOSTA:**
+        {Config.AI_RESPONSE_STYLE}
+        ---
+        **💡 HABILIDADES GERAIS:**
+            - Responda perguntas de forma clara e concisa. Ofereça ajuda e use exemplos.
+        - Mantenha conversas envolventes e naturais.
+        ---
+        **⚠️ REGRAS DE ESCALONAMENTO PARA ATENDIMENTO HUMANO:**
+            - Se o usuário pedir para falar com um humano (ex: 'falar com atendente', 'quero um humano'), sua resposta DEVE incluir o marcador [USER_REQUESTS_HUMAN_AGENT].
+            - Se você não conseguir ajudar, o usuário estiver frustrado, ou a conversa entrar em loop, sua resposta DEVE incluir o marcador [AI_NEEDS_ASSISTANCE].
+        - Exemplo de escalonamento pelo usuário: "Entendido! Vou te transferir para um de nossos atendentes. [USER_REQUESTS_HUMAN_AGENT] Por favor, aguarde."
+        - Exemplo de escalonamento pela IA: "Hmm, essa é uma pergunta complexa para mim. [AI_NEEDS_ASSISTANCE] Vou pedir ajuda a um colega humano."
+        """
+
         self.agent_prompts = {
-            'conversational': """Você é um assistente IA especializado em conversas via WhatsApp.
-            
-            🎯 PERSONALIDADE:
-            - Seja amigável, natural e empático
-            - Use emojis quando apropriado 
-            - Adapte seu tom à mensagem do usuário
-            - Seja prestativo e proativo
-            
-            💡 HABILIDADES:
-            - Responda perguntas de forma clara e concisa
-            - Ofereça ajuda adicional quando relevante
-            - Use exemplos práticos quando explicar algo
-            - Mantenha conversas envolventes
+            'conversational': "\n".join([line.strip() for line in conversational_prompt.strip().splitlines()]),
+            'visual_analyzer': "Você é um assistente visual. Sua função é analisar imagens e vídeos no contexto de uma conversa. Descreva o que você vê de forma conversacional. Se o usuário fizer uma pergunta, responda com base no conteúdo visual.",
+            'audio_processor': "Sua única função é transcrever o áudio fornecido com a maior precisão possível. Apenas retorne o texto transcrito. Se não for fala, descreva os sons (ex: [música], [risada]). Não adicione nenhuma outra palavra ou frase à sua resposta.",
+            'document_expert': "Você é um especialista em análise de documentos. Extraia e estruture informações-chave de PDFs, planilhas e outros documentos.",
+            'geolocation_specialist': """Você é um assistente IA especializado em calcular fretes e distâncias.
+            - Peça o endereço de ORIGEM e DESTINO se não forem fornecidos.
+            - Se você receber coordenadas de latitude e longitude, informe ao usuário que você recebeu a localização e peça a informação que falta (o endereço de destino) para poder calcular o frete.
+            - Use a ferramenta para calcular distância e custo.
+            - Apresente o resultado de forma clara: Distância (km), Duração Estimada e Custo do Frete (R$).
+            - Use a ferramenta. NÃO invente valores.
+            """,
+            'profile_manager': """Você é um analista de dados silencioso. Sua única função é identificar informações de perfil do usuário na mensagem fornecida e estruturá-las em JSON.
 
-            ⚠️ DETECÇÃO DE SOLICITAÇÃO DE ATENDIMENTO HUMANO E ESCALONAMENTO:
-            - Se o usuário expressar claramente o desejo de falar com um atendente humano (usando frases como 'falar com atendente', 'quero um humano', 'suporte humano', 'falar com uma pessoa', 'assistente humano', etc.), sua resposta DEVE indicar que a solicitação foi entendida e será encaminhada. NESTE CASO ESPECÍFICO, e somente neste caso, sua resposta DEVE OBRIGATORIAMENTE incluir o seguinte marcador textual em qualquer lugar da sua mensagem: [USER_REQUESTS_HUMAN_AGENT]
-            - Se você, como IA, determinar que não pode ajudar adequadamente, se o usuário parecer excessivamente frustrado, se a conversa entrar em um loop improdutivo, ou se a complexidade da consulta exceder suas capacidades atuais, você DEVE sinalizar a necessidade de assistência humana. NESTE CASO, sua resposta DEVE incluir o seguinte marcador: [AI_NEEDS_ASSISTANCE] e, idealmente, uma breve frase indicando o motivo (ex: "Não consigo processar este tipo de solicitação complexa.", "Percebo que você está frustrado e um colega humano poderá ajudar melhor.").
-            - Exemplo de resposta com [USER_REQUESTS_HUMAN_AGENT]: "Entendido! Vou te transferir para um de nossos atendentes. [USER_REQUESTS_HUMAN_AGENT] Por favor, aguarde um momento."
-            - Exemplo de resposta com [AI_NEEDS_ASSISTANCE]: "Hmm, essa é uma pergunta um pouco complexa para mim. [AI_NEEDS_ASSISTANCE] Vou pedir ajuda a um colega humano."
-            - NÃO use os marcadores para nenhuma outra finalidade.
-            - Antes de usar [AI_NEEDS_ASSISTANCE], tente o seu melhor para ajudar. Use este marcador como último recurso.
+            OBJETIVO: Identificar atributos chave que raramente mudam (nome, endereço, telefone, e-mail, preferências, etc.). Ignore informações transacionais como "meu último pedido foi X".
+
+            REGRAS DE SAÍDA:
+            1.  Sua saída DEVE SER SEMPRE um objeto JSON válido. Não inclua texto explicativo, apenas o JSON.
+            2.  Se você identificar uma informação de perfil, retorne:
+                `{"action": "SAVE", "data": {"key": "chave_identificada", "value": "valor_extraído"}}`
+            3.  As chaves permitidas são: "name", "address", "email", "phone", "company", "birthday", "preferences".
+            4.  Se a mensagem NÃO contiver nenhuma informação de perfil clara e acionável, retorne:
+                `{"action": "NONE"}`
             
-            ⚡ ESTILO:
-            - Respostas entre 1-3 parágrafos (não muito longas)
-            - Use linguagem do dia a dia
-            - Seja positivo e encorajador""",
-            
-            'visual_analyzer': """Você é um especialista em análise visual via WhatsApp.
-            
-            🔍 ANÁLISE DETALHADA:
-            - Descreva tudo que vê: objetos, pessoas, cenários, cores
-            - Identifique texto nas imagens e transcreva
-            - Analise contexto e significado da imagem
-            - Detecte produtos, marcas, locais quando possível
-            
-            📱 CASOS ESPECIAIS:
-            - Screenshots: explique o conteúdo da tela
-            - Documentos: extraia informações estruturadas
-            - Fotos pessoais: seja respeitoso e positivo
-            - Memes: explique o humor quando apropriado
-            
-            💬 RESPOSTA:
-            - Organize informações de forma clara
-            - Use listas quando há múltiplos elementos
-            - Seja específico mas conversacional""",
-            
-            'audio_processor': """Você é um especialista em processamento de áudio via WhatsApp.
-            
-            🎧 CAPACIDADES:
-            - Transcreva falas com precisão máxima
-            - Identifique música: gênero, artista, instrumentos
-            - Analise sons ambientes e efeitos sonoros
-            - Detecte emoções na voz quando é fala
-            
-            🎵 ANÁLISE MUSICAL:
-            - Descreva ritmo, melodia e harmonia
-            - Identifique instrumentos principais
-            - Sugira gênero e estilo musical
-            - Compare com artistas conhecidos se relevante
-            
-            💡 RESPOSTA:
-            - Para transcrições: seja literal e preciso
-            - Para música: seja descritivo e envolvente
-            - Inclua timestamps quando útil""",
-            
-            'document_expert': """Você é um especialista em análise de documentos via WhatsApp.
-            
-            📄 TIPOS DE DOCUMENTOS:
-            - PDFs: extraia texto principal e estrutura
-            - Planilhas: analise dados e padrões
-            - Apresentações: resuma pontos-chave
-            - Formulários: organize campos e informações
-            
-            📊 ANÁLISE ESTRUTURADA:
-            - Identifique seções principais
-            - Extraia informações-chave
-            - Detecte datas, números, contatos importantes
-            - Organize dados em formato legível
-            
-            💼 INSIGHTS:
-            - Ofereça resumos executivos
-            - Identifique pontos de ação
-            - Sugira próximos passos quando relevante
-            - Destaque informações críticas""",
-            
-            'multimodal_fusion': """Você é um especialista em fusão multimodal via WhatsApp.
-            
-            🔗 INTEGRAÇÃO DE MÚLTIPLAS MÍDIAS:
-            - Combine informações de texto, imagem e áudio
-            - Encontre conexões entre diferentes tipos de conteúdo
-            - Crie análises holísticas e contextualizadas
-            - Detecte inconsistências ou complementaridades
-            
-            🧠 ANÁLISE CONTEXTUAL:
-            - Use histórico da conversa para dar contexto
-            - Identifique padrões entre mensagens
-            - Ofereça insights baseados no conjunto completo
-            - Personalize respostas baseado no usuário
-            
-            ⚡ SÍNTESE INTELIGENTE:
-            - Combine múltiplas fontes em uma resposta coesa
-            - Priorize informações mais relevantes
-            - Mantenha clareza mesmo com complexidade alta"""
+            EXEMPLOS:
+            - Mensagem: "Olá, meu nome é Carlos." -> Saída: `{"action": "SAVE", "data": {"key": "name", "value": "Carlos"}}`
+            - Mensagem: "Gostaria de registrar minha preferência por chocolate amargo." -> Saída: `{"action": "SAVE", "data": {"key": "preferences", "value": "prefere chocolate amargo"}}`
+            - Mensagem: "Pode me enviar a fatura?" -> Saída: `{"action": "NONE"}`
+            - Mensagem: "meu endereço é rua das flores 123" -> Saída: `{"action": "SAVE", "data": {"key": "address", "value": "Rua das Flores, 123"}}`
+            """,
+            'multimodal_fusion': "Você é um especialista em fusão multimodal. Combine informações de texto, imagem e áudio para criar análises holísticas e contextualizadas."
         }
 
-        # 1. Criar Agentes Especialistas Individuais
         self.specialist_agents: Dict[str, Agent] = {}
         agent_list_for_team: List[Agent] = []
 
         for agent_name_key, system_prompt in self.agent_prompts.items():
-            descriptive_name = agent_name_key.replace("_", " ").title() + " Specialist"
-            # Role pode ser usado pela Team para entender a capacidade do agente
-            role_description = f"Especialista em {agent_name_key.replace('_', ' ')}. {system_prompt.splitlines()[0]}"
-
-
-            gemini_model_for_specialist = Gemini(
-                id=self.model_name,
-                api_key=self.api_key,
-                # System prompt é melhor nas instructions do Agent da Agno
-            )
+            descriptive_name = agent_name_key.replace("_", " ").title()
+            tools_for_agent = [self.calculate_shipping_tool] if agent_name_key == 'geolocation_specialist' else None
+            gemini_model = Gemini(id=self.model_name, api_key=self.api_key)
             specialist_agent = Agent(
                 name=descriptive_name,
-                model=gemini_model_for_specialist,
-                instructions=[system_prompt], # Prompt do sistema principal aqui
-                role=role_description, 
-                # tools=[NotTool()], # Se o agente não tiver outras ferramentas específicas
-                expected_output="Uma resposta relevante baseada na sua especialidade e na consulta do usuário.",
+                model=gemini_model,
+                instructions=[system_prompt],
+                role=f"Especialista em {descriptive_name}",
+                tools=tools_for_agent,
+                expected_output="Uma resposta relevante ou a chamada de uma ferramenta.",
                 markdown=False 
             )
             self.specialist_agents[agent_name_key] = specialist_agent
             agent_list_for_team.append(specialist_agent)
 
-        # 2. Criar a Equipe de Agentes (Master Agent)
-        team_model_instance = Gemini(id=self.model_name, api_key=self.api_key)
-        
+        team_model = Gemini(id=self.model_name, api_key=self.api_key)
         team_instructions = [
-            "Você é um despachante de IA mestre para um sistema de chatbot do WhatsApp.",
-            "Sua tarefa principal é analisar a solicitação do usuário (que pode incluir texto, uma imagem ou um arquivo de áudio) e o histórico da conversa.",
-            "Com base na sua análise, encaminhe a tarefa para o agente especialista mais apropriado da sua equipe.",
-            "Se a solicitação for complexa e envolver múltiplos tipos de mídia ou exigir uma síntese de diferentes informações, você pode precisar coordenar com o 'Multimodal Fusion Specialist' ou decidir qual especialista é o primário.",
-            "Os membros da sua equipe e suas especialidades são:",
-            f"- {self.specialist_agents['conversational'].name} (Role: {self.specialist_agents['conversational'].role}): Lida com conversas gerais, saudações, perguntas textuais, serve como fallback e pode solicitar assistência humana através dos marcadores [USER_REQUESTS_HUMAN_AGENT] ou [AI_NEEDS_ASSISTANCE].",
-            f"- {self.specialist_agents['visual_analyzer'].name} (Role: {self.specialist_agents['visual_analyzer'].role}): Analisa o conteúdo de imagens.",
-            f"- {self.specialist_agents['audio_processor'].name} (Role: {self.specialist_agents['audio_processor'].role}): Transcreve e analisa conteúdo de áudio.",
-            f"- {self.specialist_agents['document_expert'].name} (Role: {self.specialist_agents['document_expert'].role}): Extrai informações e analisa documentos (quando o conteúdo do documento é fornecido como texto longo ou imagem).",
-            f"- {self.specialist_agents['multimodal_fusion'].name} (Role: {self.specialist_agents['multimodal_fusion'].role}): Lida com solicitações que combinam explicitamente múltiplas mídias ou exigem uma síntese.",
-            "REGRA DE ROTEAMENTO IMPORTANTE:",
-            "1. Se a entrada contiver uma IMAGEM, encaminhe para o Visual Analyzer Specialist.",
-            "2. Se a entrada contiver ÁUDIO, encaminhe para o Audio Processor Specialist.",
-            "3. Se a entrada for APENAS TEXTO, encaminhe para o Conversational Specialist.",
-            "4. Se a entrada tiver MÚLTIPLOS TIPOS de mídia (ex: texto E imagem), encaminhe para o Multimodal Fusion Specialist.",
-            "5. Para análise de documentos (PDFs, etc., que são passados como imagem ou texto extraído), encaminhe para o Document Expert Specialist se a intenção do usuário for claramente sobre extrair informações de um documento.",
-            "REGRAS DE ESCALONAMENTO:",
-            " - Se a resposta do agente especialista contiver o marcador [USER_REQUESTS_HUMAN_AGENT] ou [AI_NEEDS_ASSISTANCE], sua resposta final DEVE preservar este marcador e o texto original da resposta do especialista.",
-            "Antes de encaminhar, você pode adicionar um breve preâmbulo à consulta se ajudar o especialista a entender o contexto total (especialmente o histórico da conversa).",
-            "A saída final deve ser a resposta do agente especialista escolhido, incluindo quaisquer marcadores de escalonamento."
-            # "Você pode habilitar o show_reasoning=True na sua chamada run() se precisar depurar seu processo de decisão."
+            "Você é um despachante de IA mestre para um chatbot do WhatsApp.",
+            "Sua tarefa é analisar a solicitação do usuário e o histórico da conversa, e encaminhar para o agente especialista mais apropriado da sua equipe.",
+            "REGRA DE ROTEAMENTO:",
+            "1. Se a entrada contiver uma IMAGEM, encaminhe para o Visual Analyzer.",
+            "2. Se a entrada contiver ÁUDIO, encaminhe para o Audio Processor.",
+            "3. Se a intenção for sobre FRETE/ENTREGA/DISTÂNCIA, encaminhe para o Geolocation Specialist.",
+            "4. Para MÚLTIPLOS tipos de mídia, use o Multimodal Fusion.",
+            "5. Para todo o resto (conversa geral, texto), use o Conversational Specialist.",
+            "Sua saída final deve ser a resposta do agente especialista escolhido."
         ]
-
-        self.master_team = Team(
+        self.team = Team(
             name="WhatsAppMasterAITeam",
             members=agent_list_for_team,
-            model=team_model_instance,
-            instructions=team_instructions,
-            mode="route", # Começar com 'route' para simplicidade com base nas instruções.
-                         # 'coordinate' pode ser explorado se 'route' não for suficiente.
-            # Para 'coordinate', success_criteria, max_iterations, etc. podem ser necessários.
-            # show_tool_calls=True, # Útil para depurar qual agente especialista é chamado pela equipe
-            # stream_intermediate_steps=True, # Para depurar o processo de decisão da equipe
+            model=team_model,
+            instructions=team_instructions
         )
         logger.info("AIService inicializado com Master Team e agentes especialistas.")
 
-    def _prepare_input_for_team(self, main_content_parts: List[Any], conversation_history: List[Dict] = None) -> List[Any]:
-        """Prepara a lista de conteúdo para a equipe, incluindo o histórico da conversa.
-           O conteúdo pode ser uma mistura de strings (texto) e bytes (para imagens/áudio).
-        """
-        # Part é usado para o histórico, então o check ainda é relevante.
-        if not GOOGLE_GEMINI_PARTS_AVAILABLE or not Part:
-             raise RuntimeError("Google Gemini Parts (Part) não estão disponíveis para formatar o histórico.")
-
-        final_input_for_team: List[Any] = []
-        formatted_history = self._build_conversation_context(conversation_history or [])
+    def _prepare_text_and_history(self, text: str, conversation_history: Optional[List[Dict[str, Any]]] = None, profile_data: Optional[Dict] = None, location_data: Optional[Dict] = None) -> str:
+        history_lines = []
+        if conversation_history:
+            for msg in conversation_history:
+                sender = "Usuário" if msg.get('sender_type') == 'user' else "Assistente"
+                content = msg.get('message_text', '').strip()
+                if content:
+                    history_lines.append(f"{sender}: {content}")
+        history_str = "\n".join(history_lines)
         
-        if formatted_history and formatted_history != "Nenhum histórico de conversa ainda.":
-            # Agno/Gemini models usually expect history formatted clearly.
-            # Sending it as a distinct text item before the main content.
-            final_input_for_team.append(f"Contexto da conversa anterior:\n{formatted_history}")
-            # Ou, se for necessário que seja um Part object:
-            # final_input_for_team.append(Part(text=f"Contexto da conversa anterior:\n{formatted_history}"))
+        final_prompt_parts = []
+
+        if profile_data:
+            profile_items = [f"- {key}: {value}" for key, value in profile_data.items()]
+            profile_str = "\n".join(profile_items)
+            final_prompt_parts.append(f"INFORMAÇÕES CONHECIDAS SOBRE O USUÁRIO (use isso para personalizar a resposta):\n{profile_str}")
+
+        if location_data:
+            final_prompt_parts.append(f"LOCALIZAÇÃO ATUAL DO USUÁRIO (use isso como contexto de origem): Latitude {location_data['latitude']}, Longitude {location_data['longitude']}")
+
+        if history_str:
+            final_prompt_parts.append(f"Contexto da conversa anterior:\n{history_str}")
         
-        # Adiciona as partes do conteúdo principal (texto, imagem, áudio)
-        # main_content_parts já deve ser uma lista de strings e bytes.
-        if isinstance(main_content_parts, list):
-            final_input_for_team.extend(main_content_parts)
-        # Caso main_content_parts seja um único item (string ou bytes), coloque-o numa lista
-        # Esta situação deve ser menos comum com as refatorações anteriores que já preparam listas.
-        elif isinstance(main_content_parts, (str, bytes)):
-             final_input_for_team.append(main_content_parts)
-        # Se por acaso ainda vier um Part (ex: de process_text_message se não for atualizado)
-        elif Part and isinstance(main_content_parts, Part):
-            final_input_for_team.append(main_content_parts) # Ou extrair .text/.data se necessário
+        current_message_text = text.strip()
+        if current_message_text:
+            final_prompt_parts.append(f"Mensagem atual do usuário:\n{current_message_text}")
+        
+        return "\n\n".join(final_prompt_parts) if final_prompt_parts else "Olá."
 
-        if not final_input_for_team:
-            logger.warning("Nenhuma parte de conteúdo principal para enviar à equipe, enviando prompt padrão.")
-            final_input_for_team.append("[Usuário não forneceu entrada explícita, por favor, responda apropriadamente ou peça por mais informações]")
+    def calculate_shipping_tool(self, origin: str, destination: str) -> Dict[str, Any]:
+        logger.info(f"[TOOL CALL] calculate_shipping com origem: '{origin}', destino: '{destination}'")
+        if not origin or not destination:
+            return {"status": "error", "message": "Por favor, forneça os endereços de origem e destino."}
 
-        return final_input_for_team
+        result = self.geolocation_service.get_distance_and_duration(origin, destination)
+        if result:
+            distance_km, _, _, duration_text = result
+            shipping_fee = self.geolocation_service.calculate_shipping_fee(distance_km)
+            response_message = f"Cálculo para '{origin}' até '{destination}':\n- Distância: {distance_km:.2f} km\n- Duração Estimada: {duration_text}\n- Custo do Frete: R$ {shipping_fee:.2f}"
+            logger.info(f"Resultado da ferramenta: {response_message}")
+            return {"status": "success", "message_to_user": response_message}
+        else:
+            logger.error(f"Falha ao calcular distância/frete entre '{origin}' e '{destination}'.")
+            return {"status": "error", "message": "Desculpe, não consegui calcular o frete. Verifique os endereços."}
 
-    def _process_with_team(self, main_content_items: List[Any], conversation_history: List[Dict] = None) -> Dict[str, Any]:
-        """Função helper para processar qualquer tipo de mensagem com a master_team."""
+    def process_text_message(self, text: str, conversation_history: List[Dict] = None, profile_data: Optional[Dict] = None, location_data: Optional[Dict] = None) -> Dict[str, Any]:
+        if not text or not text.strip():
+            return {'success': True, 'response': "Olá! Como posso te ajudar?", 'metadata': {}}
+        
+        conversational_agent = self.specialist_agents['conversational']
+        # --- Lógica de Roteamento Simples ---
+        # Se a intenção parecer relacionada a frete, usar o especialista.
+        # Poderíamos usar uma lógica mais avançada aqui, mas para começar:
+        if any(keyword in text.lower() for keyword in ['frete', 'entrega', 'distância', 'endereço', 'localização', 'calcular']):
+            conversational_agent = self.specialist_agents['geolocation_specialist']
+            logger.info("Roteado para Geolocation Specialist com base em palavras-chave.")
+        
         start_time = time.time()
-        escalation_type = None
-        escalation_reason_detail = "" # Para capturar a justificativa da IA, se houver
+        prompt = self._prepare_text_and_history(text, conversation_history, profile_data, location_data)
+        run_response = conversational_agent.run(prompt)
+        response_text = run_response.content if hasattr(run_response, 'content') else str(run_response)
+        processing_time_ms = int((time.time() - start_time) * 1000)
 
+        logger.info(f"Mensagem de texto processada pelo {conversational_agent.name} em {processing_time_ms}ms.")
+        return {
+            'success': True,
+            'response': response_text,
+            'metadata': {'agent_name': conversational_agent.name, 'processing_time_ms': processing_time_ms}
+        }
+
+    def process_image_message(self, image_data: bytes, text_prompt: str = "", conversation_history: List[Dict] = None, profile_data: Optional[Dict] = None) -> Dict[str, Any]:
+        start_time = time.time()
+        agent = self.specialist_agents['visual_analyzer']
+        
+        # Usa o text_prompt se fornecido, senão usa um prompt padrão.
+        prompt = self._prepare_text_and_history(text_prompt or "Analise esta imagem em detalhes.", conversation_history, profile_data)
+        
+        temp_image_path = None
         try:
-            if not self.api_key: # Adicionado para checar se a API key está disponível
-                return {'success': False, 'error': "GEMINI_API_KEY não configurada.", 'response': "Erro de configuração da IA."}
-
-            input_for_team = self._prepare_input_for_team(main_content_items, conversation_history)
+            # Salva os bytes da imagem em um arquivo temporário
+            fd, temp_image_path = tempfile.mkstemp(suffix=".jpg")
+            with os.fdopen(fd, 'wb') as temp_file:
+                temp_file.write(image_data)
             
-            logger.debug(f"Enviando para master_team.run() o seguinte input: {input_for_team}")
+            # Prepara a entrada para o agente no formato esperado
+            image_input = [{"filepath": temp_image_path}]
             
-            team_response_obj = self.master_team.run(input_for_team)
+            logger.debug(f"Enviando para Visual Analyzer. Prompt: '{prompt[:100]}...', Imagem: {image_input}")
             
-            response_text = team_response_obj.content if hasattr(team_response_obj, 'content') else str(team_response_obj)
+            # Executa o agente
+            run_response = agent.run(prompt, images=image_input)
+            response_text = run_response.content if hasattr(run_response, 'content') else str(run_response)
             
-            # Verificar marcadores de escalonamento
-            if "[USER_REQUESTS_HUMAN_AGENT]" in response_text:
-                escalation_type = "user_explicit_request"
-                # Tenta extrair um motivo se o bot adicionou algo após o marcador, embora o prompt diga para não fazer
-                # response_text = response_text.replace("[USER_REQUESTS_HUMAN_AGENT]", "").strip() # Remover o marcador da resposta final ao usuário, se desejado
-            elif "[AI_NEEDS_ASSISTANCE]" in response_text:
-                escalation_type = "ai_needs_assistance"
-                # Tenta extrair um motivo. Ex: "[AI_NEEDS_ASSISTANCE] Não consigo processar este tipo de solicitação complexa."
-                # Isso é um pouco rudimentar; idealmente, a IA retornaria isso de forma estruturada.
-                # Mas, por enquanto, podemos tentar pegar o texto após o marcador.
-                parts = response_text.split("[AI_NEEDS_ASSISTANCE]", 1)
-                if len(parts) > 1:
-                    escalation_reason_detail = parts[1].strip()
-                # response_text = response_text.replace("[AI_NEEDS_ASSISTANCE]", "").strip() # Remover o marcador, se desejado
-
-
-            agent_name_reported = self.master_team.name 
-
-            processing_time = int((time.time() - start_time) * 1000)
-            result = {
+            processing_time_ms = int((time.time() - start_time) * 1000)
+            logger.info(f"Imagem processada pelo Visual Analyzer em {processing_time_ms}ms.")
+            
+            return {
                 'success': True,
-                'response': response_text, # A resposta ainda pode conter os marcadores para a lógica de webhook decidir o que fazer
-                'model_used': self.model_name, 
-                'agent_name': agent_name_reported,
-                'processing_time': processing_time,
-                'content_type': 'text',
-                'escalation_type': escalation_type, # Novo campo
-                'escalation_reason_detail': escalation_reason_detail if escalation_type else None # Novo campo
+                'response': response_text,
+                'metadata': {'agent_name': 'Visual Analyzer (Shortcut)', 'processing_time_ms': processing_time_ms}
             }
-            logger.info(f"Mensagem processada por {agent_name_reported} (Agno Team) em {processing_time}ms. Escalonamento: {escalation_type}. Resposta: {response_text[:100]}...")
-            return result
-
         except Exception as e:
-            logger.error(f"Falha ao processar mensagem com Agno Master Team: {str(e)}", exc_info=True)
-            # Tenta obter mais detalhes se for um erro específico da API do Google/Gemini
-            # if hasattr(e, 'response') and hasattr(e.response, 'prompt_feedback'):
-            #     logger.error(f"Prompt Feedback: {e.response.prompt_feedback}")
-            # if hasattr(e, 'message'): # Alguns erros da API Google vêm com 'message'
-            #    logger.error(f"Detalhe do erro API: {e.message}")
-
+            logger.error(f"Falha ao processar imagem com Visual Analyzer: {str(e)}", exc_info=True)
             return {
                 'success': False,
                 'error': str(e),
-                'response': "Desculpe, a equipe de IA encontrou um problema ao processar sua solicitação. 😥",
-                'processing_time': int((time.time() - start_time) * 1000)
+                'response': "Desculpe, a IA encontrou um problema ao analisar a imagem. 😥"
             }
+        finally:
+            # Garante que o arquivo temporário seja removido
+            if temp_image_path and os.path.exists(temp_image_path):
+                os.remove(temp_image_path)
+                logger.debug(f"Removed temp image file: {temp_image_path}")
 
-    def process_text_message(self, text: str, conversation_history: List[Dict] = None) -> Dict[str, Any]:
-        if not GOOGLE_GEMINI_PARTS_AVAILABLE or not Part:
-            return {'success': False, 'error': "Google Gemini Parts não disponíveis.", 'response': "Erro de configuração da IA."}
-        main_content_parts = [text]
-        return self._process_with_team(main_content_parts, conversation_history)
-    
-    def process_image_message(self, image_data: bytes, text_prompt: str = None, conversation_history: List[Dict] = None) -> Dict[str, Any]:
-        # GOOGLE_GEMINI_PARTS_AVAILABLE check might still be relevant if we fall back to manual Part creation, 
-        # but ideally agno handles this. For now, let's assume agno's model handles byte inputs.
-        # if not GOOGLE_GEMINI_PARTS_AVAILABLE or not Part or not InlineData:
-        #      return {'success': False, 'error': "Google Gemini Parts não disponíveis para imagem.", 'response': "Erro de configuração da IA."}
-
-        main_parts_for_image_request = []
-        image_accompanying_text = "Analise esta imagem."
-        if text_prompt:
-            image_accompanying_text = f"Sobre esta imagem: {text_prompt}"
-        main_parts_for_image_request.append(image_accompanying_text) # Pass text directly
-
-        # Pass image_data (bytes) directly. Agno should handle converting this for Gemini.
-        # We might need to provide mime_type if agno doesn't infer it or if Gemini needs it explicitly via agno.
-        # For now, let's try with just bytes, as agno aims for simplicity.
-        main_parts_for_image_request.append(image_data)
-
-        # Old way: manual Part creation
-        # import PIL.Image
-        # import io
-        # try:
-        #     image = PIL.Image.open(io.BytesIO(image_data))
-        #     mime_type = PIL.Image.MIME.get(image.format)
-        #     if not mime_type:
-        #         if image.format.lower() in ['jpeg', 'jpg']: mime_type = 'image/jpeg'
-        #         elif image.format.lower() == 'png': mime_type = 'image/png'
-        #         # ... other mime types
-        #         else:
-        #             logger.warning(f"Mime_type não determinado para imagem: {image.format}. Usando application/octet-stream.")
-        #             mime_type = 'application/octet-stream'
-        #     main_parts_for_image_request.append(Part(inline_data=InlineData(mime_type=mime_type, data=image_data)))
-        # except Exception as img_ex:
-        #     logger.error(f"Erro ao processar dados da imagem com PIL para Agno Team: {img_ex}")
-        #     return {'success': False, 'error': f"Erro de processamento de imagem: {img_ex}", 'response': "Não foi possível processar a imagem fornecida."}
-            
-        return self._process_with_team(main_parts_for_image_request, conversation_history)
-
-    def process_audio_message(self, audio_data: bytes, conversation_history: List[Dict] = None, mime_type: str = "audio/opus") -> Dict[str, Any]:
-        # if not GOOGLE_GEMINI_PARTS_AVAILABLE or not Part or not InlineData:
-        #     return {'success': False, 'error': "Google Gemini Parts não disponíveis para áudio.", 'response': "Erro de configuração da IA."}
-
-        main_parts_for_audio_request = []
-        audio_accompanying_text = "Analise este áudio e transcreva-o se for fala, ou descreva-o se for música/som."
-        main_parts_for_audio_request.append(audio_accompanying_text) # Pass text directly
-        
-        # Pass audio_data (bytes) directly. Agno should handle this.
-        # The mime_type might be passed to agno's model if it has a specific parameter, or packaged with the data.
-        # For now, relying on agno's intelligence or default handling.
-        # If specific mime_type handling is needed, agno docs should clarify how to pass it with raw bytes.
-        main_parts_for_audio_request.append(audio_data)
-        # We might need to pass mime_type too, e.g. by making the item a tuple or dict: (audio_data, mime_type) or {"data": audio_data, "mime_type": mime_type}
-        # This depends on how agno.models.google.Gemini expects raw bytes with mime types.
-        # The agno Gemini audio examples seem to just pass bytes or file path.
-
-        # Old way:
-        # main_parts_for_audio_request.append(Part(inline_data=InlineData(mime_type=mime_type, data=audio_data)))
-        
-        return self._process_with_team(main_parts_for_audio_request, conversation_history)
-            
-    def process_multimodal_message(self, content_items: List[Dict], conversation_history: List[Dict] = None) -> Dict[str, Any]:
-        # if not GOOGLE_GEMINI_PARTS_AVAILABLE or not Part or not InlineData:
-        #     return {'success': False, 'error': "Google Gemini Parts não disponíveis para multimodal.", 'response': "Erro de configuração da IA."}
-
-        parts_for_multimodal_request: List[Any] = [] # Can now contain str and bytes
-
-        for item in content_items:
-            item_type = item.get('type')
-            item_data = item.get('data')
-            item_text_prompt = item.get('text_prompt')
-
-            if item_text_prompt:
-                parts_for_multimodal_request.append(item_text_prompt)
-
-            if item_type == 'text' and isinstance(item_data, str):
-                parts_for_multimodal_request.append(item_data)
-            elif item_type == 'image' and isinstance(item_data, bytes):
-                # Pass image bytes directly. Agno should handle it.
-                # Mime type detection via PIL might be needed if agno requires it separately for raw bytes.
-                parts_for_multimodal_request.append(item_data)
-                # Old way:
-                # import PIL.Image
-                # import io
-                # try:
-                #     image = PIL.Image.open(io.BytesIO(item_data))
-                #     mime_type = PIL.Image.MIME.get(image.format) or 'application/octet-stream'
-                #     if mime_type == 'application/octet-stream': logger.warning(f"Usando mime_type genérico para imagem {image.format} em multimodal.")
-                #     parts_for_multimodal_request.append(Part(inline_data=InlineData(mime_type=mime_type, data=item_data)))
-                # except Exception as img_ex:
-                #     logger.error(f"Erro ao processar imagem em multimodal para Agno Team: {img_ex}")
-                #     parts_for_multimodal_request.append(f"[Erro ao processar imagem: {img_ex}]") # Pass error as text
-            elif item_type == 'audio' and isinstance(item_data, bytes):
-                # Pass audio bytes directly. Agno should handle it.
-                # audio_mime_type = item.get('mime_type', 'audio/opus') # This might be needed if agno expects it.
-                parts_for_multimodal_request.append(item_data)
-                # Old way:
-                # parts_for_multimodal_request.append(Part(inline_data=InlineData(mime_type=audio_mime_type, data=item_data)))
-            else:
-                logger.warning(f"Item multimodal desconhecido ou malformado ignorado: tipo {item_type}")
-
-        if not parts_for_multimodal_request:
-             logger.warning("Nenhum item processável em process_multimodal_message.")
-             return {'success': False, 'error': "Nenhum conteúdo multimodal válido fornecido.", 'response': "Não entendi sua mensagem com múltiplos tipos de mídia."}
-
-        return self._process_with_team(parts_for_multimodal_request, conversation_history)
-
-    def _build_conversation_context(self, conversation_history: List[Dict]) -> str:
-        """Builds a formatted string from conversation history."""
-        if not conversation_history:
-            return "Nenhum histórico de conversa ainda."
-        
-        context_parts = []
-        for entry in conversation_history:
-            speaker = "Usuário" if entry.get('sender_type') == 'user' else "Assistente"
-            message = entry.get('message_text', entry.get('ai_response', '')) # Adaptar conforme a estrutura do seu histórico
-            
-            # Tenta lidar com mensagens que podem ser objetos complexos (ex: da Agno)
-            if not isinstance(message, str):
-                if hasattr(message, 'content'): # Comum em respostas da Agno
-                    message = message.content
-                elif isinstance(message, dict) and 'text' in message: # Se for um dict com 'text'
-                    message = message['text']
-                else:
-                    message = str(message) # Fallback para string
-
-            context_parts.append(f"{speaker}: {message}")
-        
-        return "\n".join(context_parts)
-    
-    def generate_summary(self, conversation_history: List[Dict]) -> str:
-        """Genera um resumo da conversa usando a MasterTeam com um prompt específico."""
-        if not GOOGLE_GEMINI_PARTS_AVAILABLE or not Part: # Adicionado para checar Part
-            logger.error("Google Gemini Parts não disponíveis para gerar resumo.")
-            return "Erro de configuração da IA ao tentar gerar resumo."
-        if not self.api_key: # Adicionado para checar API Key
-             logger.error("GEMINI_API_KEY não configurada para gerar resumo.")
-             return "Erro de configuração da IA (sem API key) ao tentar gerar resumo."
-
-
+    def process_video_message(self, video_data: bytes, text_prompt: str = "", conversation_history: List[Dict] = None, profile_data: Optional[Dict] = None) -> Dict[str, Any]:
+        """Processa uma mensagem de vídeo, analisando seu conteúdo."""
         start_time = time.time()
+        agent = self.specialist_agents['visual_analyzer']
+        
+        prompt = self._prepare_text_and_history(text_prompt or "Analise este vídeo em detalhes e descreva o que acontece.", conversation_history, profile_data)
+        
+        temp_video_path = None
         try:
-            if not conversation_history:
-                return "Não há conversa para resumir."
+            # Salva os bytes do vídeo em um arquivo temporário com a extensão correta.
+            fd, temp_video_path = tempfile.mkstemp(suffix=".mp4")
+            with os.fdopen(fd, 'wb') as temp_file:
+                temp_file.write(video_data)
+            
+            video_input = [{"filepath": temp_video_path}]
+            logger.debug(f"Enviando para Visual Analyzer. Prompt: '{prompt[:100]}...', Vídeo: {video_input}")
+            
+            # Executa o agente, passando o vídeo para análise.
+            # Assumimos que a biblioteca `agno` suporta o parâmetro `videos`.
+            run_response = agent.run(prompt, videos=video_input)
+            response_text = run_response.content if hasattr(run_response, 'content') else str(run_response)
+            
+            processing_time_ms = int((time.time() - start_time) * 1000)
+            logger.info(f"Vídeo processado pelo Visual Analyzer em {processing_time_ms}ms.")
+            
+            return {
+                'success': True,
+                'response': response_text,
+                'metadata': {'agent_name': 'Visual Analyzer (Shortcut)', 'processing_time_ms': processing_time_ms}
+            }
+        except Exception as e:
+            logger.error(f"Falha ao processar vídeo com Visual Analyzer: {str(e)}", exc_info=True)
+            return {
+                'success': False,
+                'error': str(e),
+                'response': "Desculpe, a IA encontrou um problema ao analisar o vídeo. 😥"
+            }
+        finally:
+            # Garante que o arquivo de vídeo temporário seja removido
+            if temp_video_path and os.path.exists(temp_video_path):
+                os.remove(temp_video_path)
+                logger.debug(f"Removed temp video file: {temp_video_path}")
 
-            context = self._build_conversation_context(conversation_history)
-            # Instrução para a equipe focar na tarefa de resumo
-            # O prompt original do agente conversacional é muito genérico para um bom resumo direto pela equipe.
-            # Precisamos ser explícitos sobre a tarefa de resumo para a equipe.
-            summary_prompt_for_team = [
-                Part(text=f"Você é o {self.master_team.name}. Sua tarefa atual é APENAS resumir o seguinte histórico de conversa. Use o 'Conversational Specialist' ou o 'Multimodal Fusion Specialist' para esta tarefa de resumo, se necessário. O histórico é:
+    def process_audio_message(self, audio_data: bytes, conversation_history: List[Dict] = None, profile_data: Optional[Dict] = None) -> Dict[str, Any]:
+        start_time = time.time()
+        agent = self.specialist_agents['audio_processor']
+        # A tarefa é focada na transcrição do áudio fornecido.
+        prompt = "Transcreva o áudio a seguir. Se não for fala, descreva os sons que você ouve."
 
-{context}
+        temp_out_path = None
+        try:
+            # Adicionar uma verificação para garantir que os dados do áudio não estão vazios
+            if not audio_data:
+                logger.error("process_audio_message received empty audio data. Aborting ffmpeg conversion.")
+                return {
+                    'success': False,
+                    'error': "Empty audio data received, possibly due to a decryption error.",
+                    'response': "Desculpe, não consegui processar o áudio. Parece que houve um problema na descriptografia. 😥"
+                }
 
-Por favor, gere um resumo conciso desta conversa em um parágrafo.")
+            # Etapa 1: Em vez de salvar um arquivo temporário, vamos passar os dados de áudio
+            # diretamente para o stdin do ffmpeg para evitar race conditions no sistema de arquivos.
+            fd_out, temp_out_path = tempfile.mkstemp(suffix=".wav")
+            os.close(fd_out)  # Fechar o handle para que o ffmpeg possa escrever no caminho
+
+            logger.debug(f"Attempting ffmpeg conversion via stdin to {temp_out_path}")
+            
+            command = [
+                'ffmpeg',
+                '-v', 'error',           # Logar apenas erros
+                '-f', 'ogg',             # Assumir o formato de contêiner OGG para a entrada
+                '-c:a', 'libopus',       # EXPLICITAMENTE use o codec libopus para a entrada
+                '-i', '-',               # Ler a entrada do stdin (pipe)
+                '-acodec', 'pcm_s16le',  # Codec de áudio de saída (WAV padrão)
+                '-ar', '16000',          # Taxa de amostragem de 16kHz (bom para ASR)
+                '-ac', '1',              # Um canal de áudio (mono)
+                '-y',                    # Sobrescrever arquivo de saída
+                temp_out_path
             ]
             
-            # Usamos _process_with_team que já lida com a chamada à equipe
-            # Passamos None para conversation_history aqui porque o histórico já está no prompt
-            summary_result_dict = self._process_with_team(summary_prompt_for_team, conversation_history=None) 
+            # Executa o comando, passando os bytes do áudio para o stdin do processo.
+            # text=False é crucial, pois o input e o stderr são tratados como bytes.
+            result = subprocess.run(command, input=audio_data, capture_output=True, check=False)
 
-            if summary_result_dict['success']:
-                summary = summary_result_dict['response']
-                processing_time = int((time.time() - start_time) * 1000) # Recalcular ou pegar do dict
-                logger.info(f"Resumo gerado pela Agno Team em {processing_time}ms")
-                return summary
-            else:
-                logger.error(f"Falha ao gerar resumo com Agno Team: {summary_result_dict.get('error')}")
-                return "Erro ao gerar resumo com a equipe de IA."
+            if result.returncode != 0:
+                # Decodificar stderr para logar o erro do ffmpeg de forma legível
+                stderr_text = result.stderr.decode('utf-8', errors='replace').strip()
+                logger.error(f"ffmpeg conversion failed with code {result.returncode}. stderr: {stderr_text}")
+                raise Exception(f"ffmpeg failed: {stderr_text}")
+            
+            logger.debug(f"Successfully converted audio to {temp_out_path}")
 
+            # Etapa 2: Preparar o arquivo WAV convertido para o agente.
+            audio_input = [{"filepath": temp_out_path}]
+
+            logger.debug(f"Enviando para Audio Processor. Prompt: '{prompt[:100]}...', Audio (convertido para WAV): {audio_input}")
+            
+            # Etapa 3: Executar o agente com o áudio WAV.
+            run_response = agent.run(prompt, audio=audio_input)
+            transcribed_text = run_response.content if hasattr(run_response, 'content') else str(run_response)
+            
+            transcription_time_ms = int((time.time() - start_time) * 1000)
+            logger.info(f"Audio transcribed in {transcription_time_ms}ms. Text: '{transcribed_text}'")
+            
+            # Etapa 4: Processar o texto transcrito como uma mensagem de conversação.
+            if not transcribed_text or not transcribed_text.strip():
+                logger.warning("Transcription resulted in empty text. Sending a default reply.")
+            return {
+                'success': True,
+                    'response': "Não consegui entender o que foi dito no áudio. Pode tentar de novo?", 
+                    'metadata': {'agent_name': 'Audio Processor (Shortcut)', 'processing_time_ms': transcription_time_ms}
+                }
+            
+            logger.info("Processing transcribed text with conversational agent.")
+            text_processing_result = self.process_text_message(transcribed_text, conversation_history, profile_data)
+            
+            # Adicionar o texto transcrito ao metadata para que o webhook possa usá-lo para atualizar o perfil
+            if 'metadata' not in text_processing_result:
+                text_processing_result['metadata'] = {}
+            text_processing_result['metadata']['transcribed_text'] = transcribed_text
+            
+            return text_processing_result
+            
         except Exception as e:
-            logger.error(f"Exceção ao gerar resumo com Agno Team: {e}", exc_info=True)
-            return "Erro excepcional ao gerar resumo."
+            logger.error(f"Falha ao processar áudio com Audio Processor: {str(e)}", exc_info=True)
+            return {
+                'success': False,
+                'error': str(e),
+                'response': "Desculpe, a IA encontrou um problema ao processar o áudio. 😥"
+            }
+        finally:
+            # Não há mais arquivo de entrada temporário para remover.
+            if temp_out_path and os.path.exists(temp_out_path):
+                os.remove(temp_out_path)
+                logger.debug(f"Removed temp output audio file: {temp_out_path}")
+            
+    def extract_profile_info(self, text: str) -> Optional[Dict[str, Any]]:
+        """
+        Usa o agente Profile Manager para extrair informações de perfil do texto.
+        Retorna um dicionário estruturado ou None.
+        """
+        if not text or not text.strip():
+            return None
+            
+        agent = self.specialist_agents.get('profile_manager')
+        if not agent:
+            logger.error("Agente 'profile_manager' não encontrado.")
+            return None
+        
+        try:
+            # O prompt para este agente é a própria mensagem do usuário.
+            # O system prompt do agente já contém todas as instruções.
+            run_response = agent.run(text)
+            response_content = run_response.content if hasattr(run_response, 'content') else str(run_response)
+            
+            # A resposta esperada é um JSON puro.
+            logger.debug(f"Profile Manager raw response: {response_content}")
+
+            # Limpa a string JSON de possíveis blocos de código markdown.
+            clean_json_str = response_content.strip()
+            if clean_json_str.startswith("```json"):
+                clean_json_str = clean_json_str[7:]
+            if clean_json_str.startswith("```"):
+                clean_json_str = clean_json_str[3:]
+            if clean_json_str.endswith("```"):
+                clean_json_str = clean_json_str[:-3]
+            clean_json_str = clean_json_str.strip()
+
+            profile_action = json.loads(clean_json_str)
+            
+            # Validação básica do schema esperado
+            if 'action' in profile_action and (profile_action['action'] == 'NONE' or ('data' in profile_action and 'key' in profile_action['data'] and 'value' in profile_action['data'])):
+                logger.info(f"Profile Manager extraiu a ação: {profile_action}")
+                return profile_action
+            else:
+                logger.warning(f"Profile Manager retornou JSON em formato inesperado: {clean_json_str}")
+                return None
+                
+        except json.JSONDecodeError:
+            logger.error(f"Falha ao decodificar a resposta JSON do Profile Manager. Resposta original: '{response_content}', Após limpeza: '{clean_json_str}'")
+            return None
+        except Exception as e:
+            logger.error(f"Erro ao extrair informações de perfil: {e}", exc_info=True)
+            return None
+            
+    def _process_with_team(self, text_prompt: str, conversation_history: Optional[List[Dict]] = None, audio_data: Optional[bytes] = None, image_data: Optional[List[bytes]] = None) -> Dict[str, Any]:
+        start_time = time.time()
+        temp_audio_path = None
+        temp_image_paths = []
+        try:
+            full_prompt = self._prepare_text_and_history(text_prompt, conversation_history)
+            
+            audio_path_for_run = None
+            if audio_data:
+                fd, temp_audio_path = tempfile.mkstemp(suffix=".ogg")
+                with os.fdopen(fd, 'wb') as temp_file:
+                    temp_file.write(audio_data)
+                audio_path_for_run = [{"filepath": temp_audio_path}]
+            
+            image_paths_for_run = None
+            if image_data:
+                image_paths_for_run = []
+                for i, img_bytes in enumerate(image_data):
+                    # Usar uma extensão de arquivo mais genérica ou detectar o tipo
+                    fd, temp_img_path = tempfile.mkstemp(suffix=".jpg") 
+                    with os.fdopen(fd, 'wb') as temp_file:
+                        temp_file.write(img_bytes)
+                    image_paths_for_run.append({"filepath": temp_img_path})
+                    temp_image_paths.append(temp_img_path)
+
+            logger.debug(f"Enviando para master_team.run(). Prompt: '{full_prompt[:100]}...', Audio: {audio_path_for_run}, Imagens: {image_paths_for_run}")
+            
+            team_response_obj = self.team.run(full_prompt, audio=audio_path_for_run, images=image_paths_for_run)
+            response_text = team_response_obj.content if hasattr(team_response_obj, 'content') else str(team_response_obj)
+            
+            processing_time = int((time.time() - start_time) * 1000)
+            logger.info(f"Mensagem processada por {self.team.name} em {processing_time}ms.")
+            
+            metadata = {'agent_name': self.team.name, 'processing_time_ms': processing_time}
+
+            if "[USER_REQUESTS_HUMAN_AGENT]" in response_text:
+                metadata['action'] = "REQUEST_HUMAN_AGENT"
+            elif "[AI_NEEDS_ASSISTANCE]" in response_text:
+                metadata['action'] = "REQUEST_HUMAN_AGENT"
+            
+            return {
+                'success': True,
+                'response': response_text,
+                'metadata': metadata
+            }
+        except Exception as e:
+            logger.error(f"Falha ao processar mensagem com Agno Master Team: {str(e)}", exc_info=True)
+            return {
+                'success': False,
+                'error': str(e),
+                'response': "Desculpe, a equipe de IA encontrou um problema ao processar sua solicitação. 😥"
+            }
+        finally:
+            if temp_audio_path and os.path.exists(temp_audio_path):
+                os.remove(temp_audio_path)
+                logger.debug(f"Removed temp audio file: {temp_audio_path}")
+            for path in temp_image_paths:
+                if os.path.exists(path):
+                    os.remove(path)
+                    logger.debug(f"Removed temp image file: {path}")
+
+    def generate_summary(self, conversation_history: List[Dict]) -> str:
+        if not conversation_history:
+            return "Não há conversa para resumir."
+        
+        context = self._build_conversation_context(conversation_history)
+        summary_prompt = f"Por favor, gere um resumo conciso desta conversa em um parágrafo:\n\n{context}"
+        
+        summary_result_dict = self._process_with_team(text_prompt=summary_prompt)
+        return summary_result_dict['response'] if summary_result_dict['success'] else "Erro ao gerar resumo."
+
+    def _build_conversation_context(self, conversation_history: List[Dict]) -> str:
+        if not conversation_history:
+            return ""
+        return "\n".join([f"{('Usuário' if msg['sender_type'] == 'user' else 'Assistente')}: {msg.get('message_text', '')}" for msg in conversation_history])
+
+    def process_location_message(self, latitude: float, longitude: float, conversation_history: List[Dict] = None, profile_data: Optional[Dict] = None) -> Dict[str, Any]:
+        """
+        Processa uma mensagem de localização, usando o Geolocation Specialist para pedir o destino.
+        """
+        logger.info(f"Processando mensagem de localização: lat={latitude}, lon={longitude}")
+        
+        # O texto é um placeholder para acionar o fluxo, mas o contexto principal vem dos dados de localização.
+        text_prompt = "O usuário enviou uma localização."
+        location_data = {"latitude": latitude, "longitude": longitude}
+        
+        # Forçar o uso do agente de geolocalização para este tipo de mensagem.
+        agent = self.specialist_agents['geolocation_specialist']
+        
+        start_time = time.time()
+        prompt = self._prepare_text_and_history(text_prompt, conversation_history, profile_data, location_data)
+        
+        run_response = agent.run(prompt)
+        response_text = run_response.content if hasattr(run_response, 'content') else str(run_response)
+        processing_time_ms = int((time.time() - start_time) * 1000)
+
+        logger.info(f"Localização processada pelo Geolocation Specialist em {processing_time_ms}ms.")
+        return {
+            'success': True,
+            'response': response_text,
+            'metadata': {'agent_name': agent.name, 'processing_time_ms': processing_time_ms}
+        }
