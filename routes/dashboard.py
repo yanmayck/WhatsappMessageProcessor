@@ -1,7 +1,12 @@
-from flask import Blueprint, render_template, request, jsonify, url_for
+from fastapi import APIRouter, Request, HTTPException, Depends, Query, Path, BackgroundTasks
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates # For rendering HTML templates
 from sqlalchemy import desc, func
-from app import db
-from models import Conversation, Message, AIResponse, MediaFile, HumanAgentRequest, SilentMode
+from sqlalchemy.orm import Session
+from pydantic import BaseModel # Import BaseModel
+
+from database_session import get_db # Import the get_db dependency
+from models import Conversation, Message, AIResponse, MediaFile, HumanAgentRequest, SilentMode, Order, UserProfile # Add Order and UserProfile if they are used
 from services.ai_service import AIService
 # from services.whatsapp_service import WhatsAppService
 import logging
@@ -9,22 +14,32 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-dashboard_bp = Blueprint('dashboard', __name__)
+router = APIRouter()
+
+# Configure Jinja2Templates
+templates = Jinja2Templates(directory="templates") # Assumes templates are in a 'templates' directory
 
 # whatsapp_service_instance = WhatsAppService()
 
-@dashboard_bp.route('/')
-def index():
+class AssignRequest(BaseModel):
+    agent_id: str
+
+class SilentModeEnable(BaseModel):
+    duration_hours: int = 24
+    admin_name: str = "admin"
+
+@router.get("/", response_class=HTMLResponse)
+async def index(request: Request, db: Session = Depends(get_db)):
     """Main dashboard page"""
     try:
         # Get statistics
-        total_conversations = Conversation.query.count()
-        total_messages = Message.query.count()
-        total_media_files = MediaFile.query.count()
-        active_conversations = Conversation.query.filter_by(is_active=True).count()
+        total_conversations = db.query(Conversation).count()
+        total_messages = db.query(Message).count()
+        total_media_files = db.query(MediaFile).count()
+        active_conversations = db.query(Conversation).filter_by(is_active=True).count()
         
         # Get recent conversations with message counts
-        recent_conversations = db.session.query(
+        recent_conversations = db.query(
             Conversation,
             func.count(Message.id).label('message_count'),
             func.max(Message.timestamp).label('last_message_time')
@@ -33,7 +48,7 @@ def index():
         ).limit(10).all()
         
         # Get recent media files
-        recent_media = db.session.query(MediaFile, Message, Conversation).join(
+        recent_media = db.query(MediaFile, Message, Conversation).join(
             Message, MediaFile.message_id == Message.id
         ).join(
             Conversation, Message.conversation_id == Conversation.id
@@ -46,27 +61,27 @@ def index():
             'active_conversations': active_conversations
         }
         
-        return render_template('dashboard.html', 
-                             stats=stats,
-                             recent_conversations=recent_conversations,
-                             recent_media=recent_media)
+        return templates.TemplateResponse("dashboard.html", 
+                                      {"request": request,
+                                       "stats": stats,
+                                       "recent_conversations": recent_conversations,
+                                       "recent_media": recent_media})
         
     except Exception as e:
         logger.error(f"Dashboard error: {str(e)}")
-        return render_template('dashboard.html', 
-                             stats={'error': str(e)},
-                             recent_conversations=[],
-                             recent_media=[])
+        return templates.TemplateResponse("dashboard.html", 
+                                      {"request": request,
+                                       "stats": {'error': str(e)},
+                                       "recent_conversations": [],
+                                       "recent_media": []})
 
-@dashboard_bp.route('/conversations')
-def conversations():
+@router.get("/conversations", response_class=HTMLResponse)
+async def conversations(request: Request, db: Session = Depends(get_db),
+                        page: int = Query(1, alias="page"), per_page: int = Query(20, alias="per_page")):
     """List all conversations"""
     try:
-        page = request.args.get('page', 1, type=int)
-        per_page = 20
-        
         # Get conversations with message counts and last message time
-        conversations_query = db.session.query(
+        conversations_query = db.query(
             Conversation,
             func.count(Message.id).label('message_count'),
             func.max(Message.timestamp).label('last_message_time')
@@ -74,142 +89,169 @@ def conversations():
             desc('last_message_time')
         )
         
-        conversations = conversations_query.paginate(
-            page=page, per_page=per_page, error_out=False
-        )
+        # Manual pagination
+        total_items = conversations_query.count() # Count before slicing
+        conversations_data = conversations_query.offset((page - 1) * per_page).limit(per_page).all()
         
-        return render_template('conversations.html', conversations=conversations)
+        total_pages = (total_items + per_page - 1) // per_page
+
+        pagination = {
+            "page": page,
+            "pages": total_pages,
+            "per_page": per_page,
+            "total": total_items,
+            "has_next": page < total_pages,
+            "has_prev": page > 1,
+        }
+
+        return templates.TemplateResponse("conversations.html", 
+                                      {"request": request,
+                                       "conversations": conversations_data,
+                                       "pagination": pagination})
         
     except Exception as e:
         logger.error(f"Conversations listing error: {str(e)}")
-        return render_template('conversations.html', 
-                             conversations=None, 
-                             error=str(e))
+        return templates.TemplateResponse("conversations.html", 
+                                      {"request": request,
+                                       "conversations": [], 
+                                       "pagination": {},
+                                       "error": str(e)})
 
-@dashboard_bp.route('/conversation/<int:conversation_id>')
-def conversation_detail(conversation_id):
+@router.get("/conversation/{conversation_id}", response_class=HTMLResponse)
+async def conversation_detail(request: Request, conversation_id: int = Path(...), db: Session = Depends(get_db)):
     """View detailed conversation with messages"""
     try:
-        conversation = Conversation.query.get_or_404(conversation_id)
+        conversation = db.query(Conversation).get(conversation_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
         
         # Get all messages for this conversation
-        messages = Message.query.filter_by(
+        messages = db.query(Message).filter_by(
             conversation_id=conversation_id
         ).order_by(Message.timestamp.asc()).all()
         
         # Get AI responses for messages
         message_responses = {}
         for message in messages:
-            responses = AIResponse.query.filter_by(message_id=message.id).all()
+            responses = db.query(AIResponse).filter_by(message_id=message.id).all()
             message_responses[message.id] = responses
         
         # Get media files for messages
         message_media = {}
         for message in messages:
             if message.message_type in ['image', 'audio', 'video', 'document']:
-                media = MediaFile.query.filter_by(message_id=message.id).first()
+                media = db.query(MediaFile).filter_by(message_id=message.id).first()
                 message_media[message.id] = media
         
-        return render_template('conversation.html',
-                             conversation=conversation,
-                             messages=messages,
-                             message_responses=message_responses,
-                             message_media=message_media)
+        return templates.TemplateResponse("conversation.html",
+                                      {"request": request,
+                                       "conversation": conversation,
+                                       "messages": messages,
+                                       "message_responses": message_responses,
+                                       "message_media": message_media})
         
+    except HTTPException as he:
+        raise he # Re-raise HTTPException to be caught by FastAPI's exception handler
     except Exception as e:
         logger.error(f"Conversation detail error: {str(e)}")
-        return render_template('conversation.html',
-                             conversation=None,
-                             messages=[],
-                             error=str(e))
+        return templates.TemplateResponse("conversation.html",
+                                      {"request": request,
+                                       "conversation": None,
+                                       "messages": [],
+                                       "error": str(e)})
 
-@dashboard_bp.route('/api/conversations')
-def api_conversations():
+@router.get("/api/conversations")
+async def api_conversations(db: Session = Depends(get_db),
+                          page: int = Query(1, alias="page"),
+                          per_page: int = Query(20, alias="per_page"),
+                          search: str = Query('', alias="search")):
     """API endpoint for conversations list"""
     try:
-        page = request.args.get('page', 1, type=int)
-        per_page = request.args.get('per_page', 20, type=int)
-        search = request.args.get('search', '')
-        
-        query = db.session.query(
+        query = db.query(
             Conversation,
             func.count(Message.id).label('message_count'),
             func.max(Message.timestamp).label('last_message_time')
         ).outerjoin(Message).group_by(Conversation.id)
         
         if search:
+            # Assuming 'phone_number' and 'contact_name' are attributes of Conversation
             query = query.filter(
-                Conversation.phone_number.contains(search) |
+                Conversation.user_phone.contains(search) |
                 Conversation.contact_name.contains(search)
             )
         
-        conversations = query.order_by(
+        # Manual pagination for API
+        total_items = query.count()
+        conversations_data = query.order_by(
             desc('last_message_time')
-        ).paginate(page=page, per_page=per_page, error_out=False)
+        ).offset((page - 1) * per_page).limit(per_page).all()
         
+        total_pages = (total_items + per_page - 1) // per_page
+
         result = {
             'conversations': [],
             'pagination': {
-                'page': conversations.page,
-                'pages': conversations.pages,
-                'per_page': conversations.per_page,
-                'total': conversations.total,
-                'has_next': conversations.has_next,
-                'has_prev': conversations.has_prev
+                'page': page,
+                'pages': total_pages,
+                'per_page': per_page,
+                'total': total_items,
+                'has_next': page < total_pages,
+                'has_prev': page > 1
             }
         }
         
-        for conv, msg_count, last_time in conversations.items:
+        for conv, msg_count, last_time in conversations_data:
             result['conversations'].append({
                 'id': conv.id,
-                'phone_number': conv.phone_number,
+                'user_phone': conv.user_phone, # Changed from phone_number to user_phone
                 'contact_name': conv.contact_name,
                 'message_count': msg_count or 0,
                 'last_message_time': last_time.isoformat() if last_time else None,
                 'is_active': conv.is_active,
                 'created_at': conv.created_at.isoformat(),
-                'url': url_for('dashboard.conversation_detail', conversation_id=conv.id)
+                'url': f"/dashboard/conversation/{conv.id}" # Manual URL construction
             })
         
-        return jsonify(result)
+        return JSONResponse(content=result)
         
     except Exception as e:
         logger.error(f"API conversations error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-@dashboard_bp.route('/api/conversation/<int:conversation_id>/messages')
-def api_conversation_messages(conversation_id):
+@router.get("/api/conversation/{conversation_id}/messages")
+async def api_conversation_messages(conversation_id: int = Path(...), db: Session = Depends(get_db),
+                                  page: int = Query(1, alias="page"), per_page: int = Query(50, alias="per_page")):
     """API endpoint for conversation messages"""
     try:
-        page = request.args.get('page', 1, type=int)
-        per_page = request.args.get('per_page', 50, type=int)
-        
-        messages = Message.query.filter_by(
+        messages_query = db.query(Message).filter_by(
             conversation_id=conversation_id
-        ).order_by(Message.timestamp.desc()).paginate(
-            page=page, per_page=per_page, error_out=False
-        )
+        ).order_by(Message.timestamp.desc())
+        
+        total_items = messages_query.count()
+        messages_data = messages_query.offset((page - 1) * per_page).limit(per_page).all()
+        
+        total_pages = (total_items + per_page - 1) // per_page
         
         result = {
             'messages': [],
             'pagination': {
-                'page': messages.page,
-                'pages': messages.pages,
-                'per_page': messages.per_page,
-                'total': messages.total,
-                'has_next': messages.has_next,
-                'has_prev': messages.has_prev
+                'page': page,
+                'pages': total_pages,
+                'per_page': per_page,
+                'total': total_items,
+                'has_next': page < total_pages,
+                'has_prev': page > 1
             }
         }
         
-        for message in messages.items:
+        for message in messages_data:
             # Get AI responses
-            ai_responses = AIResponse.query.filter_by(message_id=message.id).all()
+            ai_responses = db.query(AIResponse).filter_by(message_id=message.id).all()
             
             # Get media file if exists
             media_file = None
             if message.message_type in ['image', 'audio', 'video', 'document']:
-                media_file = MediaFile.query.filter_by(message_id=message.id).first()
+                media_file = db.query(MediaFile).filter_by(message_id=message.id).first()
             
             message_data = {
                 'id': message.id,
@@ -249,35 +291,35 @@ def api_conversation_messages(conversation_id):
             
             result['messages'].append(message_data)
         
-        return jsonify(result)
+        return JSONResponse(content=result)
         
     except Exception as e:
         logger.error(f"API conversation messages error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-@dashboard_bp.route('/api/stats')
-def api_stats():
+@router.get("/api/stats")
+async def api_stats(db: Session = Depends(get_db)):
     """API endpoint for dashboard statistics"""
     try:
         # Basic counts
-        total_conversations = Conversation.query.count()
-        total_messages = Message.query.count()
-        total_media_files = MediaFile.query.count()
-        active_conversations = Conversation.query.filter_by(is_active=True).count()
+        total_conversations = db.query(Conversation).count()
+        total_messages = db.query(Message).count()
+        total_media_files = db.query(MediaFile).count()
+        active_conversations = db.query(Conversation).filter_by(is_active=True).count()
         
         # Message type distribution
-        message_types = db.session.query(
+        message_types = db.query(
             Message.message_type,
             func.count(Message.id).label('count')
         ).group_by(Message.message_type).all()
         
         # AI response statistics
-        ai_responses_count = AIResponse.query.count()
-        successful_responses = AIResponse.query.filter_by(sent_to_whatsapp=True).count()
+        ai_responses_count = db.query(AIResponse).count()
+        successful_responses = db.query(AIResponse).filter_by(sent_to_whatsapp=True).count()
         
         # Processing statistics
-        processed_messages = Message.query.filter_by(processed=True).count()
-        failed_messages = Message.query.filter(Message.processing_error.isnot(None)).count()
+        processed_messages = db.query(Message).filter_by(processed=True).count()
+        failed_messages = db.query(Message).filter(Message.processing_error.isnot(None)).count()
         
         stats = {
             'totals': {
@@ -299,25 +341,27 @@ def api_stats():
             }
         }
         
-        return jsonify(stats)
+        return JSONResponse(content=stats)
         
     except Exception as e:
         logger.error(f"API stats error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-@dashboard_bp.route('/api/conversation/<int:conversation_id>/summary')
-def api_conversation_summary(conversation_id):
+@router.get("/api/conversation/{conversation_id}/summary")
+async def api_conversation_summary(conversation_id: int = Path(...), db: Session = Depends(get_db)):
     """Generate AI summary of a conversation"""
     try:
-        conversation = Conversation.query.get_or_404(conversation_id)
+        conversation = db.query(Conversation).get(conversation_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
         
         # Get conversation messages
-        messages = Message.query.filter_by(
+        messages = db.query(Message).filter_by(
             conversation_id=conversation_id
         ).order_by(Message.timestamp.asc()).all()
         
         if not messages:
-            return jsonify({'summary': 'No messages in this conversation yet.'})
+            return JSONResponse(content={'summary': 'No messages in this conversation yet.'})
         
         # Build conversation history for AI
         conversation_history = []
@@ -333,7 +377,7 @@ def api_conversation_summary(conversation_id):
         ai_service = AIService()
         summary = ai_service.generate_summary(conversation_history)
         
-        return jsonify({
+        return JSONResponse(content={
             'summary': summary,
             'message_count': len(messages),
             'conversation_id': conversation_id
@@ -341,17 +385,16 @@ def api_conversation_summary(conversation_id):
         
     except Exception as e:
         logger.error(f"Conversation summary error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-@dashboard_bp.route('/api/human-handoff-requests', methods=['GET'])
-def api_get_human_handoff_requests():
+@router.get("/api/human-handoff-requests", response_class=HTMLResponse)
+async def api_get_human_handoff_requests(request: Request, db: Session = Depends(get_db),
+                                         page: int = Query(1, alias="page"),
+                                         per_page: int = Query(20, alias="per_page"),
+                                         status_filter: str = Query(default="pending")):
     """API endpoint para listar solicitações de atendimento humano."""
     try:
-        page = request.args.get('page', 1, type=int)
-        per_page = request.args.get('per_page', 20, type=int)
-        status_filter = request.args.get('status', 'pending')
-
-        query = HumanAgentRequest.query
+        query = db.query(HumanAgentRequest)
         if status_filter != 'all':
             query = query.filter(HumanAgentRequest.status == status_filter)
         
@@ -384,62 +427,62 @@ def api_get_human_handoff_requests():
                 'assigned_agent_id': req.assigned_agent_id,
                 'assigned_time': req.assigned_time.isoformat() if req.assigned_time else None,
                 'closed_time': req.closed_time.isoformat() if req.closed_time else None,
-                'conversation_url': url_for('dashboard.conversation_detail', conversation_id=req.conversation_id)
+                'conversation_url': f"/dashboard/conversation/{req.conversation_id}"
             })
         
-        return jsonify(result)
+        return templates.TemplateResponse("human_handoff.html", {"request": request, "requests": result['requests']})
 
     except Exception as e:
         logger.error(f"API human handoff requests error: {str(e)}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-@dashboard_bp.route('/api/human-handoff-requests/<int:request_id>', methods=['GET'])
-def api_get_human_handoff_request_detail(request_id):
+@router.get("/api/human-handoff-requests/{request_id}", response_class=HTMLResponse)
+async def api_get_human_handoff_request_detail(request_id: int = Path(...), *, request: Request, db: Session = Depends(get_db)):
     """API endpoint para obter detalhes de uma solicitação de atendimento humano, incluindo histórico completo."""
     try:
-        req = HumanAgentRequest.query.get_or_404(request_id)
-        return jsonify({
-            'id': req.id,
-            'conversation_id': req.conversation_id,
-            'phone_number': req.phone_number,
-            'contact_name': req.contact_name,
-            'request_time': req.request_time.isoformat() if req.request_time else None,
-            'status': req.status,
-            'escalation_reason': req.escalation_reason,
-            'ai_summary_of_issue': req.ai_summary_of_issue,
-            'full_conversation_history_json': req.full_conversation_history_json,
-            'assigned_agent_id': req.assigned_agent_id,
-            'assigned_time': req.assigned_time.isoformat() if req.assigned_time else None,
-            'resolution_notes': req.resolution_notes,
-            'closed_time': req.closed_time.isoformat() if req.closed_time else None,
-            'conversation_url': url_for('dashboard.conversation_detail', conversation_id=req.conversation_id)
+        req = db.query(HumanAgentRequest).get_or_404(request_id)
+        return templates.TemplateResponse("human_handoff_detail.html", {
+            "request": request,
+            "id": req.id,
+            "conversation_id": req.conversation_id,
+            "phone_number": req.phone_number,
+            "contact_name": req.contact_name,
+            "request_time": req.request_time.isoformat() if req.request_time else None,
+            "status": req.status,
+            "escalation_reason": req.escalation_reason,
+            "ai_summary_of_issue": req.ai_summary_of_issue,
+            "full_conversation_history_json": req.full_conversation_history_json,
+            "assigned_agent_id": req.assigned_agent_id,
+            "assigned_time": req.assigned_time.isoformat() if req.assigned_time else None,
+            "resolution_notes": req.resolution_notes,
+            "closed_time": req.closed_time.isoformat() if req.closed_time else None,
+            "conversation_url": f"/dashboard/conversation/{req.conversation_id}"
         })
     except Exception as e:
         logger.error(f"API human handoff request detail error for ID {request_id}: {str(e)}", exc_info=True)
-        return jsonify({'error': str(e)}), 404 if isinstance(e, Exception) and "404 Not Found" in str(e) else 500
+        raise HTTPException(status_code=404 if isinstance(e, Exception) and "404 Not Found" in str(e) else 500, detail=str(e))
 
-@dashboard_bp.route('/api/human-handoff-requests/<int:request_id>/assign', methods=['POST'])
-def api_assign_human_handoff_request(request_id):
+@router.post("/api/human-handoff-requests/{request_id}/assign", response_class=JSONResponse)
+async def api_assign_human_handoff_request(request_id: int = Path(...), *, assign_request: AssignRequest, db: Session = Depends(get_db)):
     """API endpoint para um agente se atribuir a uma solicitação."""
     try:
-        data = request.get_json()
-        agent_id = data.get('agent_id')
+        agent_id = assign_request.agent_id
 
         if not agent_id:
-            return jsonify({'error': 'agent_id é obrigatório'}), 400
+            return JSONResponse(content={'error': 'agent_id é obrigatório'}, status_code=400)
 
-        req = HumanAgentRequest.query.get_or_404(request_id)
+        req = db.query(HumanAgentRequest).get_or_404(request_id)
         
         if req.status != 'pending':
-            return jsonify({'error': f'Solicitação {request_id} não está pendente (status atual: {req.status})'}), 400
+            return JSONResponse(content={'error': f'Solicitação {request_id} não está pendente (status atual: {req.status})'}, status_code=400)
 
         req.status = 'assigned'
         req.assigned_agent_id = agent_id
         req.assigned_time = datetime.utcnow()
-        db.session.commit()
+        db.commit()
 
         logger.info(f"HumanAgentRequest {request_id} atribuído ao agente {agent_id}")
-        return jsonify({
+        return JSONResponse(content={
             'message': 'Solicitação atribuída com sucesso',
             'request': {
                 'id': req.id,
@@ -447,33 +490,33 @@ def api_assign_human_handoff_request(request_id):
                 'assigned_agent_id': req.assigned_agent_id,
                 'assigned_time': req.assigned_time.isoformat()
             }
-        }), 200
+        }, status_code=200)
 
     except Exception as e:
         logger.error(f"Erro ao atribuir HumanAgentRequest {request_id}: {str(e)}", exc_info=True)
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 500
+        db.rollback()
+        return JSONResponse(content={'error': str(e)}, status_code=500)
 
-@dashboard_bp.route('/human-handoff')
-def human_handoff_page():
+@router.get("/human-handoff", response_class=HTMLResponse)
+async def human_handoff_page(request: Request):
     """Página do dashboard para gerenciar solicitações de atendimento humano."""
     # Esta rota simplesmente renderizaria um template HTML.
     # A lógica de dados viria das chamadas de API (api_get_human_handoff_requests).
     # Por enquanto, apenas uma resposta placeholder.
     # return render_template('human_handoff.html', title="Atendimento Humano") 
-    return jsonify({"message": "Página de Atendimento Humano (template HTML a ser criado)"}), 200
+    return HTMLResponse(content="Página de Atendimento Humano (template HTML a ser criado)")
 
-@dashboard_bp.route('/api/conversation/<int:conversation_id>/silent_mode', methods=['POST'])
-def enable_silent_mode(conversation_id):
+@router.post("/api/conversation/{conversation_id}/silent_mode", response_class=JSONResponse)
+async def enable_silent_mode(conversation_id: int = Path(...), *, silent_mode_data: SilentModeEnable, db: Session = Depends(get_db)):
     """Ativa o modo silencioso para uma conversa"""
     try:
-        duration_hours = request.json.get('duration_hours', 24)  # Padrão de 24 horas
-        admin_name = request.json.get('admin_name', 'admin')
+        duration_hours = silent_mode_data.duration_hours  # Padrão de 24 horas
+        admin_name = silent_mode_data.admin_name
         
-        conversation = Conversation.query.get_or_404(conversation_id)
+        conversation = db.query(Conversation).get_or_404(conversation_id)
         
         # Desativa qualquer modo silencioso existente
-        existing_silent = SilentMode.query.filter_by(
+        existing_silent = db.query(SilentMode).filter_by(
             conversation_id=conversation_id,
             is_active=True
         ).all()
@@ -487,47 +530,47 @@ def enable_silent_mode(conversation_id):
             expires_at=datetime.utcnow() + timedelta(hours=duration_hours)
         )
         
-        db.session.add(silent_mode)
-        db.session.commit()
+        db.add(silent_mode)
+        db.commit()
         
-        return jsonify({
+        return JSONResponse(content={
             'status': 'success',
             'message': f'Silent mode enabled for {duration_hours} hours',
             'expires_at': silent_mode.expires_at.isoformat()
-        })
+        }, status_code=200)
         
     except Exception as e:
         logger.error(f"Error enabling silent mode: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return JSONResponse(content={'error': str(e)}, status_code=500)
 
-@dashboard_bp.route('/api/conversation/<int:conversation_id>/silent_mode', methods=['DELETE'])
-def disable_silent_mode(conversation_id):
+@router.delete("/api/conversation/{conversation_id}/silent_mode", response_class=JSONResponse)
+async def disable_silent_mode(conversation_id: int = Path(...), db: Session = Depends(get_db)):
     """Desativa o modo silencioso para uma conversa"""
     try:
-        conversation = Conversation.query.get_or_404(conversation_id)
+        conversation = db.query(Conversation).get_or_404(conversation_id)
         
         # Desativa todos os modos silenciosos ativos
-        silent_modes = SilentMode.query.filter_by(
+        silent_modes = db.query(SilentMode).filter_by(
             conversation_id=conversation_id,
             is_active=True
         ).all()
         
         if not silent_modes:
-            return jsonify({
+            return JSONResponse(content={
                 'status': 'warning',
                 'message': 'Silent mode was not active'
-            })
+            }, status_code=200)
         
         for silent in silent_modes:
             silent.is_active = False
         
-        db.session.commit()
+        db.commit()
         
-        return jsonify({
+        return JSONResponse(content={
             'status': 'success',
             'message': 'Silent mode disabled'
-        })
+        }, status_code=200)
         
     except Exception as e:
         logger.error(f"Error disabling silent mode: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return JSONResponse(content={'error': str(e)}, status_code=500)

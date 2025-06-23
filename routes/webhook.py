@@ -1,8 +1,11 @@
 import json
 import logging
 import threading
-from flask import Blueprint, request, jsonify, current_app
-from app import db
+from fastapi import APIRouter, Request, HTTPException, BackgroundTasks, Depends
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
+
+from app import get_db # Assuming get_db provides a DB session, adjust if needed
 from models import Conversation, Message, AIResponse, MediaFile, HumanAgentRequest, UserProfile, Order
 from services.whatsapp_service import WhatsAppService
 from services.media_processor import MediaProcessor
@@ -14,7 +17,7 @@ import requests # Adicionado para Pushover
 
 logger = logging.getLogger(__name__)
 
-webhook_bp = Blueprint('webhook', __name__)
+router = APIRouter()
 
 # Initialize services
 whatsapp_service = WhatsAppService()
@@ -22,44 +25,44 @@ media_processor = MediaProcessor()
 ai_service = AIService()
 cloud_storage = CloudStorageService()
 
-@webhook_bp.route('/whatsapp', methods=['GET'])
-def verify_webhook():
+@router.get("/whatsapp")
+async def verify_webhook(request: Request):
     """Verify WhatsApp webhook (required for setup)"""
     try:
         # WhatsApp sends these parameters for verification
-        mode = request.args.get('hub.mode')
-        token = request.args.get('hub.verify_token')
-        challenge = request.args.get('hub.challenge')
+        mode = request.query_params.get('hub.mode')
+        token = request.query_params.get('hub.verify_token')
+        challenge = request.query_params.get('hub.challenge')
         
         logger.info(f"Webhook verification attempt: mode={mode}, token={token}")
         
         # Verify the token matches what we expect
         if mode == 'subscribe' and token == Config.WEBHOOK_VERIFY_TOKEN:
             logger.info("Webhook verified successfully")
-            return challenge, 200
+            return JSONResponse(content=challenge, status_code=200)
         else:
             logger.warning("Webhook verification failed - invalid token")
-            return 'Forbidden', 403
+            raise HTTPException(status_code=403, detail="Forbidden")
             
     except Exception as e:
         logger.error(f"Webhook verification error: {str(e)}")
-        return 'Internal Server Error', 500
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
-@webhook_bp.route('/whatsapp', methods=['POST'])
-def handle_webhook():
+@router.post("/whatsapp")
+async def handle_webhook(request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Handle incoming WhatsApp messages"""
     try:
-        data = request.get_json()
+        data = await request.json()
         
         if not data:
             logger.warning("Received empty webhook data")
-            return jsonify({'status': 'error', 'message': 'No data received'}), 400
+            raise HTTPException(status_code=400, detail='No data received')
         
         # Verify API Key from Evolution API
         received_api_key = data.get('apikey')
         if not received_api_key or received_api_key != Config.EVOLUTION_API_KEY:
             logger.warning(f"Webhook authentication failed. Received API Key: {received_api_key}")
-            return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
+            raise HTTPException(status_code=403, detail='Forbidden')
         
         logger.info(f"Received webhook data: {json.dumps(data, indent=2)}")
         
@@ -68,17 +71,10 @@ def handle_webhook():
             message_payload = data.get('data')
             if message_payload:
                 try:
-                    # Pass the inner 'data' object as message_data, and the root 'data' as webhook_context_data
                     if Config.ENABLE_ASYNC_PROCESSING:
-                        flask_app = current_app._get_current_object() # Obter a instância real da app
-                        thread = threading.Thread(
-                            target=process_message_async,
-                            args=(flask_app, message_payload, data) # Passar flask_app como primeiro argumento
-                        )
-                        thread.daemon = True
-                        thread.start()
+                        background_tasks.add_task(process_message_sync, message_payload, data, db) # Pass db session
                     else:
-                        process_message_sync(message_payload, data) # Pass full data as second arg for context
+                        process_message_sync(message_payload, data, db) # Pass full data as second arg for context
                 except Exception as e:
                     logger.error(f"Error processing 'messages.upsert' event: {str(e)}")
             else:
@@ -95,33 +91,26 @@ def handle_webhook():
                     for message_data_old_format in messages:
                         try:
                             if Config.ENABLE_ASYNC_PROCESSING:
-                                flask_app = current_app._get_current_object() # Obter a instância real da app
-                                thread = threading.Thread(
-                                    target=process_message_async,
-                                    args=(flask_app, message_data_old_format, value) # Passar flask_app
-                                )
-                                thread.daemon = True
-                                thread.start()
+                                background_tasks.add_task(process_message_sync, message_data_old_format, value, db) # Pass db session
                             else:
-                                process_message_sync(message_data_old_format, value)
+                                process_message_sync(message_data_old_format, value, db)
                         except Exception as e:
                             logger.error(f"Error processing message (old format): {str(e)}")
                             continue
         else:
             logger.warning(f"Received webhook data with unknown structure or event type: {data.get('event')}")
 
-        return jsonify({'status': 'success'}), 200
+        return JSONResponse(content={'status': 'success'}, status_code=200)
         
     except Exception as e:
         logger.error(f"Webhook handling error: {str(e)}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-def process_message_async(app, message_data, webhook_context_data): # Adicionado app como parâmetro
-    """Process a message asynchronously"""
-    with app.app_context(): # Usar a instância 'app' passada
-        process_message_sync(message_data, webhook_context_data)
+def process_message_async(app, message_data, webhook_context_data):
+    """This function is no longer needed with FastAPI's BackgroundTasks. Remove if not used elsewhere."""
+    pass # The logic moved to background_tasks.add_task(process_message_sync, ...)
 
-def process_message_sync(message_data, webhook_context_data): # Renamed webhook_value for clarity
+def process_message_sync(message_data, webhook_context_data, db: Session): # Added db as parameter
     """Process a single WhatsApp message (handles both old and new formats via duck-typing in extraction)"""
     processed_media_bytes_for_ai: Optional[bytes] = None
     conversation_id_for_logging = None
@@ -188,7 +177,7 @@ def process_message_sync(message_data, webhook_context_data): # Renamed webhook_
                     break
 
         # Find or create conversation
-        conversation = Conversation.query.filter_by(user_phone=from_number).first()
+        conversation = db.query(Conversation).filter_by(user_phone=from_number).first()
         if not conversation:
             conversation = Conversation(
                 user_phone=from_number,
@@ -197,17 +186,19 @@ def process_message_sync(message_data, webhook_context_data): # Renamed webhook_
                 # or from a fixed config if the instance implies the business account.
                 # For old format: webhook_context_data.get('metadata', {}).get('phone_number_id')
             )
-            db.session.add(conversation)
-            db.session.commit()
+            db.add(conversation)
+            db.commit()
+            db.refresh(conversation) # Refresh to get the generated ID
             logger.info(f"Created new conversation for {from_number} (Name: {contact_name}), ID: {conversation.id}")
         elif not conversation.contact_name and contact_name: # Update contact name if it was missing
             conversation.contact_name = contact_name
-            db.session.commit()
+            db.commit()
+            db.refresh(conversation)
             logger.info(f"Updated contact name for {from_number} to {contact_name}")
 
         conversation_id_for_logging = conversation.id
 
-        existing_message = Message.query.filter_by(whatsapp_message_id=message_id).first()
+        existing_message = db.query(Message).filter_by(whatsapp_message_id=message_id).first()
         if existing_message:
             logger.info(f"Message {message_id} already processed")
             return
@@ -426,20 +417,21 @@ def process_message_sync(message_data, webhook_context_data): # Renamed webhook_
             message.processing_error = "Unsupported message type by current logic"
 
 
-        db.session.add(message)
-        db.session.commit() # Commit for message to get an ID
+        db.add(message)
+        db.commit() # Commit for message to get an ID
+        db.refresh(message)
 
         #---> ATUALIZAÇÃO DO PERFIL DO USUÁRIO <---
         # Após salvar a mensagem, tentamos extrair e salvar informações de perfil do texto.
         # Isso é feito independentemente do tipo de mensagem, pois mesmo uma imagem pode ter uma legenda com informações.
         if message.content and isinstance(message.content, str) and message.content.strip():
-            update_user_profile(conversation, message.content)
+            update_user_profile(db, conversation, message.content)
 
 
         if 'media_file_obj' in locals() and media_file_obj: # Check if media_file_obj was created (old format media)
             media_file_obj.message_id = message.id
-            db.session.add(media_file_obj)
-            db.session.commit()
+            db.add(media_file_obj)
+            db.commit()
             logger.info(f"MediaFile record created for message {message.id}")
 
         # Mark message as read - This uses OLD API message_id. 
@@ -453,7 +445,7 @@ def process_message_sync(message_data, webhook_context_data): # Renamed webhook_
         # Generate AI response
         # Ensure message.content and message.mime_type are correctly set before this call.
         # For new format media, message.content might be a placeholder and mime_type might be missing.
-        ai_response_text, ai_metadata = generate_ai_response(message, media_bytes=processed_media_bytes_for_ai)
+        ai_response_text, ai_metadata = generate_ai_response(db, message, media_bytes=processed_media_bytes_for_ai)
 
         # Enviar a resposta da IA para o usuário se houver uma
         if ai_response_text:
@@ -469,6 +461,7 @@ def process_message_sync(message_data, webhook_context_data): # Renamed webhook_
             # Aqui, criamos o HumanAgentRequest e obtemos seu ID.
             reason_for_request = ai_metadata.get("reason", "AI requested assistance") # Obtenha a razão do metadata se houver
             human_request_id = create_human_agent_request(
+                db,
                 conversation_id=conversation.id,
                 reason=reason_for_request
             )
@@ -498,16 +491,16 @@ def process_message_sync(message_data, webhook_context_data): # Renamed webhook_
         # Usamos a mensagem original do usuário e o histórico para dar contexto ao Order Manager.
         if message.content and isinstance(message.content, str) and message.content.strip():
             # Precisamos do histórico mais recente para que o Order Manager possa extrair os itens
-            full_history_for_order = get_conversation_history(message.conversation_id, limit=20) # Pega um histórico maior
-            create_order_from_interaction(message.conversation, message.content, full_history_for_order)
+            full_history_for_order = get_conversation_history(db, message.conversation_id, limit=20) # Pega um histórico maior
+            create_order_from_interaction(db, message.conversation, message.content, full_history_for_order)
         
         logger.info(f"Message {message_id} (DB ID: {message.id}) processed successfully for conversation {conversation.id}")
         
     except Exception as e:
         logger.error(f"Error processing message {message_data.get('id', 'unknown')} for conversation {conversation_id_for_logging if conversation_id_for_logging else 'unknown'}: {str(e)}", exc_info=True)
-        db.session.rollback()
+        db.rollback()
 
-def update_user_profile(conversation: Conversation, message_text: str):
+def update_user_profile(db: Session, conversation: Conversation, message_text: str):
     """
     Chama o AI Service para extrair informações de perfil e as salva no banco de dados.
     """
@@ -533,7 +526,7 @@ def update_user_profile(conversation: Conversation, message_text: str):
         user_profile = conversation.profile
         if not user_profile:
             user_profile = UserProfile(conversation_id=conversation.id, profile_data={})
-            db.session.add(user_profile)
+            db.add(user_profile)
         
         # Atualiza os dados do perfil.
         # Usar .copy() para garantir que o SQLAlchemy detecte a mudança no JSON.
@@ -541,23 +534,24 @@ def update_user_profile(conversation: Conversation, message_text: str):
         updated_data[key] = value
         user_profile.profile_data = updated_data
         
-        db.session.commit()
+        db.commit()
+        db.refresh(user_profile)
         logger.info(f"Perfil do usuário para a conversa {conversation.id} atualizado. Chave: '{key}', Valor: '{value}'")
 
     except Exception as e:
-        db.session.rollback()
+        db.rollback()
         logger.error(f"Falha ao atualizar o perfil do usuário para a conversa {conversation.id}: {e}", exc_info=True)
 
-def create_human_agent_request(conversation_id: int, reason: str):
+def create_human_agent_request(db: Session, conversation_id: int, reason: str):
     """Creates a request for a human agent and saves it to the database."""
     try:
-        conversation = Conversation.query.get(conversation_id)
+        conversation = db.query(Conversation).get(conversation_id)
         if not conversation:
             logger.error(f"Cannot create human agent request: Conversation {conversation_id} not found.")
             return
 
         # Check for an existing active request
-        existing_request = HumanAgentRequest.query.filter_by(
+        existing_request = db.query(HumanAgentRequest).filter_by(
             conversation_id=conversation_id,
             status='pending'
         ).first()
@@ -573,20 +567,21 @@ def create_human_agent_request(conversation_id: int, reason: str):
             request_reason=reason,
             status='pending'
         )
-        db.session.add(human_request)
-        db.session.commit()
+        db.add(human_request)
+        db.commit()
+        db.refresh(human_request)
         logger.info(f"Human agent request created for conversation {conversation_id} with reason: {reason}")
         return human_request.id  # Retornar o ID da solicitação criada
     
     except Exception as e:
-        db.session.rollback()
+        db.rollback()
         logger.error(f"Failed to create human agent request for conversation {conversation_id}: {e}", exc_info=True)
         return None
 
-def get_conversation_history(conversation_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+def get_conversation_history(db: Session, conversation_id: int, limit: int = 10) -> List[Dict[str, Any]]:
     """Fetches and formats the recent conversation history for the AI service."""
     # Fetches messages in ascending order to get the latest ones at the end
-    recent_messages = Message.query.filter_by(
+    recent_messages = db.query(Message).filter_by(
         conversation_id=conversation_id
     ).order_by(Message.timestamp.asc()).all()
 
@@ -601,7 +596,7 @@ def get_conversation_history(conversation_id: int, limit: int = 10) -> List[Dict
         })
     return history_for_ai
 
-def generate_ai_response(message: Message, media_bytes: Optional[bytes] = None) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+def generate_ai_response(db: Session, message: Message, media_bytes: Optional[bytes] = None) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
     """
     Generates a response from the AI service based on the message and conversation history.
     Also handles creating a HumanAgentRequest if the AI signals it.
@@ -610,7 +605,7 @@ def generate_ai_response(message: Message, media_bytes: Optional[bytes] = None) 
         # ---> VERIFICAÇÃO DE FRETE PROATIVO <---
         # Se a mensagem atual for um texto e a anterior for uma localização, calcula o frete automaticamente.
         if message.message_type == 'text' and message.content and message.content.strip():
-            previous_message = Message.query.filter(
+            previous_message = db.query(Message).filter(
                 Message.conversation_id == message.conversation_id,
                 Message.timestamp < message.timestamp
             ).order_by(Message.timestamp.desc()).first()
@@ -643,8 +638,9 @@ def generate_ai_response(message: Message, media_bytes: Optional[bytes] = None) 
                             response_content=response_text,
                             agent_name=ai_metadata.get('agent_name')
                         )
-                        db.session.add(ai_response)
-                        db.session.commit()
+                        db.add(ai_response)
+                        db.commit()
+                        db.refresh(ai_response)
                         logger.info(f"Resposta de frete proativo para mensagem {message.id} salva no DB.")
 
                         return response_text, ai_metadata
@@ -655,14 +651,14 @@ def generate_ai_response(message: Message, media_bytes: Optional[bytes] = None) 
                     logger.error(f"Erro ao tentar o cálculo de frete proativo: {e}. Seguindo fluxo normal.")
                     # Em caso de erro, simplesmente segue para o processamento normal da IA.
 
-        conversation_history = get_conversation_history(message.conversation_id)
+        conversation_history = get_conversation_history(db, message.conversation_id)
         
         # ---> CARREGAR DADOS DO PERFIL DO USUÁRIO <---
-        user_profile = UserProfile.query.filter_by(conversation_id=message.conversation_id).first()
+        user_profile = db.query(UserProfile).filter_by(conversation_id=message.conversation_id).first()
         profile_data = user_profile.profile_data if user_profile else None
 
         # ---> CARREGAR ÚLTIMO PEDIDO DO USUÁRIO <---
-        last_order = Order.query.filter_by(
+        last_order = db.query(Order).filter_by(
             conversation_id=message.conversation_id,
             status='completed'
         ).order_by(Order.created_at.desc()).first()
@@ -720,20 +716,20 @@ def generate_ai_response(message: Message, media_bytes: Optional[bytes] = None) 
             # Atualiza o conteúdo da mensagem original com o texto transcrito para que
             # ele se torne parte permanente do histórico da conversa.
             message.content = transcribed_text
-            db.session.add(message) # Adiciona a mudança à sessão do DB
+            db.add(message) # Adiciona a mudança à sessão do DB
             logger.info(f"Conteúdo da mensagem de áudio (ID: {message.id}) atualizado com o texto transcrito.")
 
             logger.info(f"Texto transcrito do áudio ('{transcribed_text}') será usado para atualização de perfil.")
             # A função `update_user_profile` já existe e faz o que precisamos.
-            update_user_profile(message.conversation, transcribed_text)
+            update_user_profile(db, message.conversation, transcribed_text)
         
         # ---> DETECÇÃO E CRIAÇÃO DE PEDIDO <---
         # Após a resposta ser gerada, verificamos se a interação resultou em um pedido.
         # Usamos a mensagem original do usuário e o histórico para dar contexto ao Order Manager.
         if message.content and isinstance(message.content, str) and message.content.strip():
             # Precisamos do histórico mais recente para que o Order Manager possa extrair os itens
-            full_history_for_order = get_conversation_history(message.conversation_id, limit=20) # Pega um histórico maior
-            create_order_from_interaction(message.conversation, message.content, full_history_for_order)
+            full_history_for_order = get_conversation_history(db, message.conversation_id, limit=20) # Pega um histórico maior
+            create_order_from_interaction(db, message.conversation, message.content, full_history_for_order)
     
         # Salvar a resposta da IA no banco de dados
         ai_response = AIResponse(
@@ -742,8 +738,9 @@ def generate_ai_response(message: Message, media_bytes: Optional[bytes] = None) 
             agent_name=ai_metadata.get('agent_name'),
             processing_time=ai_metadata.get('processing_time_ms')
         )
-        db.session.add(ai_response)
-        db.session.commit()
+        db.add(ai_response)
+        db.commit()
+        db.refresh(ai_response)
         logger.info(f"AI response for message {message.id} saved to DB.")
         
         # Checar pela ação de solicitar um agente humano
@@ -758,11 +755,11 @@ def generate_ai_response(message: Message, media_bytes: Optional[bytes] = None) 
 
     except Exception as e:
         logger.error(f"Error generating AI response for message {message.id}: {e}", exc_info=True)
-        db.session.rollback()
+        db.rollback()
         # Fallback response
         return "Ops! Aconteceu um erro com a nossa IA. Já estamos verificando.", None
 
-def create_order_from_interaction(conversation: Conversation, user_message: str, conversation_history: List[Dict]):
+def create_order_from_interaction(db: Session, conversation: Conversation, user_message: str, conversation_history: List[Dict]):
     """
     Chama o AI Service para detectar uma confirmação de pedido e o salva no banco de dados.
     """
@@ -783,12 +780,13 @@ def create_order_from_interaction(conversation: Conversation, user_message: str,
             order_details=order_data, # Salva o JSON completo com itens, etc.
             status='completed' # Ou o status que fizer sentido no seu fluxo
         )
-        db.session.add(new_order)
-        db.session.commit()
+        db.add(new_order)
+        db.commit()
+        db.refresh(new_order)
         logger.info(f"Novo pedido (ID: {new_order.id}) criado para a conversa {conversation.id} com base na interação do usuário.")
 
     except Exception as e:
-        db.session.rollback()
+        db.rollback()
         logger.error(f"Falha ao criar pedido a partir da interação para a conversa {conversation.id}: {e}", exc_info=True)
 
 def send_pushover_notification(title: str, message: str, user_key: str, app_token: str = Config.PUSHOVER_APP_TOKEN, **kwargs: Optional[Dict[str, Any]]):

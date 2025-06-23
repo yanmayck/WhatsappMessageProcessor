@@ -1,7 +1,7 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, UniqueConstraint, Index, JSON
 from sqlalchemy.sql import func
 from datetime import datetime, timezone
-from extensions import db
+from extensions import Base # Import Base from extensions.py
 from sqlalchemy.orm import relationship
 
 # Defina o nome do schema se estiver usando PostgreSQL e um schema específico
@@ -9,7 +9,7 @@ from sqlalchemy.orm import relationship
 SCHEMA_NAME = None # Defina como None se não estiver usando um schema ou para outros DBs
 
 # Classe base para os modelos, pode incluir colunas comuns como created_at, updated_at
-class BaseModel(db.Model):
+class BaseModel(Base):
     __abstract__ = True # Indica que esta classe não é mapeada para uma tabela
     # __table_args__ = {"schema": SCHEMA_NAME} if SCHEMA_NAME else {}
 
@@ -161,7 +161,7 @@ class HumanAgentRequest(BaseModel):
     closed_time = Column(DateTime, nullable=True)
 
     # Relacionamentos
-    conversation = relationship('Conversation', backref=db.backref('human_agent_requests', lazy='dynamic', cascade="all, delete-orphan"))
+    conversation = relationship('Conversation', backref='human_agent_requests') # Changed db.backref to relationship.backref
     last_message_before_escalation = relationship('Message', foreign_keys=[last_message_id_before_escalation])
 
     def __repr__(self):
@@ -179,17 +179,23 @@ class SilentMode(BaseModel):
     is_active = Column(Boolean, default=True)
     
     # Relacionamento com a conversa
-    conversation = relationship("Conversation", backref=db.backref('silent_mode', lazy=True))
+    conversation = relationship("Conversation", backref='silent_mode') # Changed db.backref to relationship.backref
     
     @staticmethod
     def is_conversation_silent(conversation_id):
         """Verifica se uma conversa está em modo silencioso"""
         now = datetime.now(timezone.utc)
-        silent = SilentMode.query.filter_by(
-            conversation_id=conversation_id,
-            is_active=True
-        ).filter(SilentMode.expires_at > now).first()
-        return bool(silent)
+        # Use SessionLocal for static method or pass db session
+        from database_session import SessionLocal
+        db_session = SessionLocal()
+        try:
+            silent = db_session.query(SilentMode).filter_by(
+                conversation_id=conversation_id,
+                is_active=True
+            ).filter(SilentMode.expires_at > now).first()
+            return bool(silent)
+        finally:
+            db_session.close()
     
     def __repr__(self):
         return f'<SilentMode {self.conversation_id} expires={self.expires_at}>'
@@ -210,7 +216,7 @@ class VectorEmbedding(BaseModel):
     embedding = Column(Text, nullable=False)  # Store embedding as text, or use a specific type if your DB supports it (e.g., ARRAY or a vector type)
     model_name = Column(String(100)) # e.g., 'text-embedding-ada-002'
 
-    company_info = relationship("CompanyInfo", backref=db.backref('vector_embeddings', lazy=True, cascade="all, delete-orphan"))
+    company_info = relationship("CompanyInfo", backref='vector_embeddings') # Changed db.backref to relationship.backref
 
     def __repr__(self):
         return f'<VectorEmbedding for CompanyInfo {self.company_info_id}>'

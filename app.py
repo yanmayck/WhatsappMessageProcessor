@@ -1,43 +1,48 @@
 import os
 import logging
-from flask import Flask
-from werkzeug.middleware.proxy_fix import ProxyFix
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware # For CORS if needed
 from config import Config
-from extensions import db # Importa db de extensions.py
+from database_session import create_db_tables, get_db # Import from new file
 
 # Configure logging for debugging
 logging.basicConfig(level=logging.DEBUG)
 
-def create_app(config_class=Config):
-    app = Flask(__name__)
-    app.config.from_object(config_class)
+def create_app():
+    app = FastAPI(
+        title="WhatsApp Message Processor API",
+        description="API for processing WhatsApp messages and interacting with AI/CRM.",
+        version="1.0.0",
+    )
 
-    # Initialize Flask extensions here
-    db.init_app(app)
+    # CORS middleware (adjust origins as needed)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Allows all origins
+        allow_credentials=True,
+        allow_methods=["*"],  # Allows all methods
+        allow_headers=["*"],  # Allows all headers
+    )
 
-    # ProxyFix
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+    # Register routers here
+    from routes.webhook import router as webhook_router
+    # from routes.dashboard import dashboard_bp # To be converted
+    # from routes.tasks import tasks_bp # To be converted
 
-    # Register blueprints here
-    from routes.webhook import webhook_bp
-    from routes.dashboard import dashboard_bp
-    from routes.tasks import tasks_bp
+    app.include_router(webhook_router, prefix="/webhook")
+    # app.include_router(dashboard_router, prefix="/dashboard") # Once converted
+    # app.include_router(tasks_router, prefix="/tasks") # Once converted
 
-    app.register_blueprint(webhook_bp, url_prefix='/webhook')
-    app.register_blueprint(dashboard_bp, url_prefix='/dashboard')
-    app.register_blueprint(tasks_bp, url_prefix='/tasks')
-
-    # Create database tables if they don't exist
-    # É importante fazer isso dentro do contexto da aplicação
-    with app.app_context():
-        db.create_all()
-        # Aqui você pode adicionar qualquer outra inicialização que dependa do app_context
-        # Exemplo: initialize_vector_db(app)
+    @app.on_event("startup")
+    async def startup_event():
+        """Create database tables on application startup."""
+        create_db_tables()
+        logging.info("Database tables checked/created.")
 
     return app
 
-# Se você quiser rodar localmente com 'flask run' ou 'python app.py'
-# esta parte é útil, mas para Gunicorn, ele usará a fábrica create_app.
-if __name__ == '__main__':
-    app = create_app()
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=True)
+app = create_app()
+
+# To run locally with uvicorn: uvicorn app:app --reload --port 8080
+# The if __name__ == '__main__' block is generally not used with uvicorn directly
+# as uvicorn loads the 'app' object directly.

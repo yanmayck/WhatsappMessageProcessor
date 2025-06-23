@@ -1,36 +1,35 @@
 import logging
-from flask import Blueprint, jsonify, request, current_app
-from app import db
+from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
+
+from database_session import get_db # Import the get_db dependency
 from models import HumanAgentRequest
+from config import Config
 
 logger = logging.getLogger(__name__)
-tasks_bp = Blueprint('tasks', __name__)
+router = APIRouter()
 
-@tasks_bp.route('/tasks/reset-human-agent-queue', methods=['POST'])
-def reset_human_agent_queue():
+@router.post("/reset-human-agent-queue")
+async def reset_human_agent_queue(request: Request, db: Session = Depends(get_db)):
     """Endpoint para ser chamado pelo Cloud Scheduler para resetar a fila de solicitações de agente humano."""
-    # Medida de segurança: Verificar um token bearer no header Authorization
-    # Em produção, o Cloud Scheduler pode ser configurado para enviar um token OIDC 
-    # que pode ser verificado pelo Cloud Run para uma segurança ainda maior.
-    # Por agora, usaremos um token bearer simples.
     auth_header = request.headers.get('Authorization')
-    expected_token = f"Bearer {current_app.config.get('INTERNAL_TASK_TOKEN')}"
+    expected_token = f"Bearer {Config.INTERNAL_TASK_TOKEN}"
 
-    if not current_app.config.get('INTERNAL_TASK_TOKEN'):
+    if not Config.INTERNAL_TASK_TOKEN:
         logger.error("INTERNAL_TASK_TOKEN não está configurado no servidor. Endpoint de reset não pode ser executado com segurança.")
-        # Em um cenário de produção real, você pode querer retornar 500 ou uma mensagem mais genérica.
-        return jsonify({"status": "error", "message": "Configuration error: Task token not set."}), 500
+        raise HTTPException(status_code=500, detail="Configuration error: Task token not set.")
 
     if not auth_header or auth_header != expected_token:
         logger.warning(f"Tentativa não autorizada de resetar a fila de agentes humanos. Header: {auth_header}")
-        return jsonify({"status": "error", "message": "Unauthorized"}), 403
+        raise HTTPException(status_code=403, detail="Unauthorized")
 
     try:
-        num_rows_deleted = db.session.query(HumanAgentRequest).delete()
-        db.session.commit()
+        num_rows_deleted = db.query(HumanAgentRequest).delete()
+        db.commit()
         logger.info(f"Fila de solicitações de agente humano resetada com sucesso. {num_rows_deleted} registros excluídos.")
-        return jsonify({"status": "success", "message": "Human agent request queue reset.", "rows_deleted": num_rows_deleted}), 200
+        return JSONResponse(content={"status": "success", "message": "Human agent request queue reset.", "rows_deleted": num_rows_deleted}, status_code=200)
     except Exception as e:
-        db.session.rollback()
+        db.rollback()
         logger.error(f"Erro ao resetar fila de solicitações de agente humano: {str(e)}", exc_info=True)
-        return jsonify({"status": "error", "message": f"Failed to reset queue: {str(e)}"}), 500 
+        raise HTTPException(status_code=500, detail=f"Failed to reset queue: {str(e)}") 
